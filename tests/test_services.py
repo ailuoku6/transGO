@@ -25,12 +25,16 @@ def test_rpc_notifications_ids_and_errors():
     assert call("new_game", {"size": 19})["result"]["size"] == 19
 
 
-def test_promotion_rejects_small_incomplete_or_weak_evaluations():
-    result = {"completed": 40, "truncated": 0, "winrate": 0.75, "confidence95": wilson_interval(30, 40)}
+def test_promotion_uses_gatekeeper_points_and_accepts_ties():
+    result = {"games": 50, "completed": 50, "truncated": 0,
+              "wins": 25, "losses": 25, "draws": 0,
+              "winrate": 0.5, "confidence95": wilson_interval(25, 50)}
     assert should_promote(result)
     assert not should_promote({**result, "completed": 2})
     assert not should_promote({**result, "truncated": 1})
-    assert not should_promote({**result, "winrate": 0.5, "confidence95": wilson_interval(20, 40)})
+    assert not should_promote({**result, "wins": 24, "losses": 26})
+    # Small engineering smoke matches follow the same acceptance rule.
+    assert should_promote({**result, "games": 2, "completed": 2, "wins": 1, "losses": 1})
 
 
 def test_formal_adjudication_is_rules_only_and_shape_report_is_forecast():

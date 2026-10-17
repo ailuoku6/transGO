@@ -207,7 +207,7 @@ L = lambda_pi * CE(pi_t, softmax(policy_logits))
 
 建议初始权重：`lambda_pi=1.0`、`lambda_z=1.0`、`lambda_score=0.2~0.5`、`lambda_own=0.1~0.3`、`lambda_mvl=0.05~0.15`。用独立验证集和对局 Elo 调整，不要盲目追求辅助 head 的单项损失。
 
-训练采用 replay window，只保留最近若干百万到数千万局面；按样本新鲜度和 TD/策略误差做轻量优先采样，同时保留均匀采样比例防止分布偏移。每轮训练后让 candidate 与 best 做固定开局、随机开局和历史 checkpoint 对局，candidate 胜率超过阈值（例如 55%~60%，并达到最小对局数）才晋级。
+训练采用 replay window，只保留最近若干百万到数千万局面；按样本新鲜度和 TD/策略误差做轻量优先采样，同时保留均匀采样比例防止分布偏移。每轮训练后让 candidate 与 best 做 gatekeeper 对局：默认最多 200 局，胜局记 1 分、和棋/无结果记 0.5 分，达到要求的累计得分比例（默认 0.5，平分接受）才晋级；如果剩余对局已不可能达到门槛则提前拒绝，已经达到门槛则提前接受。评估从空盘开始，黑白配对、无根噪声并采用早期高温到后期低温的随机落子。
 
 ### 阶段 D：课程学习
 
@@ -223,7 +223,7 @@ L = lambda_pi * CE(pi_t, softmax(policy_logits))
 
 ### 7.1 Worker 协议
 
-每个 worker 只负责：加载指定模型、维护规则状态、运行 MCTS、写出压缩样本。中央服务负责模型版本和任务分配。样本文件建议使用 Parquet、LMDB 或 WebDataset shards，字段包括：
+每个 worker 只负责：加载指定模型、维护规则状态、运行 MCTS、写出压缩样本。当前单机实现使用 Python `spawn` 进程池；一个 actor worker 在进程生命周期内复用模型和搜索 evaluator，多盘棋完成后再退出。评估 worker 同样各自加载 candidate/baseline，父进程按预先生成的颜色/随机种子顺序汇总 gatekeeper 结果，避免完成顺序改变晋级决策。中央服务负责模型版本和任务分配。样本文件建议使用 Parquet、LMDB 或 WebDataset shards，字段包括：
 
 ```text
 model_version, board_size, rules, komi,
@@ -296,7 +296,7 @@ actor nodes -> object storage/replay shards -> learner GPUs
 - 贴目变化和黑白交换的性能；
 - 读秒下每步延迟、吞吐、峰值显存。
 
-评测使用 SPRT 或最小对局数，避免少量偶然对局导致错误晋级。至少保留一个永不训练的固定基准集和一组隐藏随机种子。
+权重晋级采用 KataGo gatekeeper 的累计 match points 和数学提前停止，避免把尚未完成的比赛误判为通过；长期强度报告仍应保留永不训练的固定基准集、一组隐藏随机种子，并可另行使用 SPRT 或按开局对统计。
 
 ### 9.3 阶段验收
 

@@ -19,7 +19,7 @@
 - uncertainty head 用 Gaussian NLL 学习方差；ownership 用三分类保留中立区域。
 - 只用真实终局辅助标签，截断局丢弃；认输棋谱只监督 policy/WDL。
 - 初期 dense masked attention 易验证，后续再实现真正分块窗口。
-- learner 进度独立于 best；候选晋级需要最小样本和统计证据。
+- learner 进度独立于 best；候选晋级采用 KataGo gatekeeper 的累计 match points、平分接受和数学可确定时提前停止。
 - 依赖首次 PyPI 下载超时，改清华 PyPI 镜像安装公开同名依赖，已完成。
 
 ## 2026-10-15 - 用户取消人类棋谱路线

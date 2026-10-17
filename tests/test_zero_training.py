@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pytest
 import torch
@@ -53,11 +54,15 @@ def test_zero_pipeline_random_init_two_rounds(tmp_path):
     seed_all(config.seed)
     run_pipeline(config, torch.device("cpu"), tmp_path, iterations=2, selfplay_games=1,
                  train_steps=1, eval_games=2, report=lambda _: None)
+    records = [json.loads((tmp_path/f"iteration-{i:04d}.json").read_text()) for i in (1, 2)]
+    best_step = max((d["iteration"] for d in records if d["promoted"]), default=0)
     for name in ("best.pt", "learner.pt", "candidate-0001.pt", "candidate-0002.pt"):
         _, _, payload = load_checkpoint(tmp_path/name, torch.device("cpu"), selfplay_only=True)
         assert payload["training_origin"] == "random_init_selfplay"
         if name == "learner.pt": assert payload["step"] == 2
-        if name == "best.pt": assert payload["step"] == 0
+        if name == "best.pt": assert payload["step"] == best_step
+    assert all(d["promotion_policy"] == "katago-gatekeeper-v1" for d in records)
+    assert records[0]["eval_seed"] != records[1]["eval_seed"]
     paths = list((tmp_path/"replay").glob("*.npz"))
     assert len(paths) == 2
     for path in paths: assert read_shard(path)[1]["source"] == "selfplay"

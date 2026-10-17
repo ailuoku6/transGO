@@ -55,14 +55,25 @@ transformer-go doctor
 
 .venv/bin/transformer-go loop \
   --config configs/tiny.yaml --output runs/9x9 \
-  --iterations 5 --games 16 --steps 200 --eval-games 40
+  --iterations 5 --games 16 --steps 200 --eval-games 200
 ```
 
-`loop` 保存独立的 `best.pt` 与 `learner.pt`：actor 使用 best；learner 不因候选模型未晋级而丢失训练进度。每轮保存 candidate、对局 replay 和评测 JSON。默认晋级要求：无截断评测局、至少 40 盘完成对局、胜率至少 55%、近似 Wilson 95% 区间下界大于 50%。2 盘 smoke 评测不触发晋级。评测采用配对颜色和相同随机开局，置信区间是工程近似，后续研究评测应升级为按开局对统计或 SPRT。
+`loop` 保存独立的 `best.pt` 与 `learner.pt`：actor 使用 best；learner 不因候选模型未晋级而丢失训练进度。每轮保存 candidate、对局 replay 和评测 JSON。晋级现在采用 KataGo gatekeeper 的 match-point 规则：默认最多 200 盘，candidate 得分为胜局 1 分、和棋/无结果 0.5 分，达到 `--required-candidate-win-prop`（默认 0.5）即可接受，平分晋级；如果剩余对局无论结果如何都不能达到门槛，则提前拒绝，达到门槛也会提前接受。评估从空盘开始，候选黑白双方轮换，关闭根 Dirichlet 噪声，并使用 KataGo gatekeeper 示例的 0.5 到 0.2 温度衰减。Wilson 区间仍作为描述性字段输出，不参与晋级。2 盘 smoke 评测也遵循同一累计得分规则。
+
+如果要复现 KataGo 示例 gatekeeper 的默认门槛，可以使用：
+
+```bash
+.venv/bin/transformer-go loop \
+  --config configs/tiny.yaml --output runs/zero-9x9 \
+  --iterations 500 --games 64 --steps 1000 --eval-games 200 \
+  --min-moves 70 --required-candidate-win-prop 0.5
+```
+
+`--eval-games 50` 仍然可以用于较快评估；在默认 0.5 门槛下，50 盘完整比赛至少需要 25 个 match points，25 胜 25 负也会晋级。由于 gatekeeper 会提前停止，实际完成的对局数可能小于上限，iteration JSON 的 `played`、`candidate_points`、`target_points`、`stop_reason` 和 `promotion_policy` 是晋级审计依据。
 
 当前闭环按轮执行，并非跨机器异步集群；不要同时对同一个 loop 目录启动多个 learner。
 
-## 并行自博弈
+## 并行自博弈与评估
 
 ```bash
 .venv/bin/transformer-go selfplay \
@@ -70,7 +81,29 @@ transformer-go doctor
   --output data/replay --games 8 --workers 2 --min-moves 40
 ```
 
-使用 spawn 多进程，actor 各自持有模型和 C++ 搜索树；并发数默认 1。Metal 共享系统内存，先从 2 个 actor 开始测量。第一版还没有集中式 GPU 推理服务，增加 actor 不一定带来同比加速。checkpoint 提供完整的自博弈模型及搜索配置；传入 `--checkpoint` 时使用 checkpoint 保存的配置，`--config` 的 device 字段决定本次运行设备。
+使用 spawn 多进程，actor 各自持有一份模型和 C++ 搜索树；同一个 worker 会复用模型完成多盘棋，不会每盘重新加载 checkpoint。并发数默认 1。Metal 共享系统内存，先从 2 个 actor 开始测量。第一版还没有集中式 GPU 推理服务，增加 actor 不一定带来同比加速。checkpoint 提供完整的自博弈模型及搜索配置；传入 `--checkpoint` 时使用 checkpoint 保存的模型，`--config` 的 device 字段决定本次运行设备。父进程会转发每盘 `game_completed` 事件，最后输出 `parallel_selfplay_complete`。
+
+完整 `loop` 也支持把自博弈和评估分别放入多进程池：
+
+```bash
+.venv/bin/transformer-go loop \
+  --config configs/tiny.yaml --output runs/zero-9x9 \
+  --iterations 500 --games 64 --steps 1000 --eval-games 200 \
+  --min-moves 70 --selfplay-workers 2 --eval-workers 2
+```
+
+`--selfplay-workers` 控制每轮自博弈 actor 数，`--eval-workers` 控制 candidate/best 评估 worker 数；两者默认都是 `1`，所以旧命令仍按串行方式运行。评估 worker 各自加载 candidate 和 baseline，父进程预先生成黑白轮换与随机种子，并按该顺序汇总结果，因此 match points、晋级和 JSON 记录不受 worker 完成顺序影响。评估按小批次启动任务；如果 gatekeeper 已经确定晋级或淘汰，当前批次已经启动的棋局可能完成但会被丢弃，不计入 `played`，进程池会等待这些已运行任务退出。
+
+也可以单独并行评估两个 checkpoint：
+
+```bash
+.venv/bin/transformer-go eval \
+  --config configs/tiny.yaml --candidate runs/new.pt \
+  --baseline runs/zero-9x9/best.pt --games 200 --workers 2 \
+  --required-candidate-win-prop 0.5
+```
+
+多进程会为每个 worker 保留独立的 Transformer 模型。MPS/Metal 下先使用 `2`，观察内存和吞吐后再增加；多个进程争抢同一 GPU 时可能比 `1` 更慢。训练器本身仍在父进程中单进程使用 MPS，避免多个 optimizer 同时更新同一 checkpoint。
 
 ## 从零开始的训练路线
 
@@ -90,7 +123,7 @@ transformer-go doctor
 ```bash
 .venv/bin/transformer-go loop \
   --config configs/tiny.yaml --output runs/zero-9x9 \
-  --iterations 5 --games 16 --steps 200 --eval-games 40 --min-moves 40 \
+  --iterations 5 --games 16 --steps 200 --eval-games 200 --min-moves 40 \
   --score-utility 0.05
 ```
 
@@ -154,6 +187,7 @@ benchmark 包含一次预热并同步 GPU，报告该配置下的搜索速度、
 - 策略为搜索访问分布，胜负类顺序为 `负/和/胜 = 0/1/2`；价值、目数与归属均以样本当前行棋方为视角。
 - score 和 moves-left 除以棋盘面积归一化；ownership 是 `对手/中立/当前方 = 0/1/2`。自博弈正常终局样本的 `aux_mask=1`。
 - 达到最大手数仍未终局的自博弈局丢弃；不会用强制 pass 制造训练标签。
+- 评估 gatekeeper 使用 KataGo 的 `maxMovesPerGame` 风格强制计分：超过评估手数上限的局面通过 `BoardHistory` 当前分数计入 match points；无结果局按 0.5 分计入双方。自博弈仍丢弃未正式终局的局，避免把强制评估裁定混入训练标签。
 - NPZ shard 不使用 pickle，包含 schema、UUID、模型 SHA256、种子、搜索配置和规则元数据。写入先落临时文件再原子替换。float32 特征保留贴目与进度精度；未来规模化时再量化/迁移为流式 shards。
 - 训练使用均匀采样的近期 replay window、D8 对称增强、AdamW、梯度裁剪和 float32。Checkpoint 保存权重、优化器、训练步数、配置、采样 RNG，支持恢复训练。规则核心升级不会删除 `runs/` 下已有 checkpoint；继续同一 9x9 目录时，旧 replay 会通过 SGF 在 KataGo 规则下重放，只重算 value/score/ownership 标签，并写入 `.adjudication-cache/`，原 NPZ/SGF 与权重保持不变。新生成的 shard 会记录 `adjudication_version=katago-boardhistory-v1`。
 - 局部注意力当前用 dense attention mask 实现，表达局部先验但没有稀疏窗口算子的性能收益；C++ 单树批量搜索使用叶子预留/虚拟损失，尚未实现多线程共享树。
