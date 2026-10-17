@@ -1,0 +1,18 @@
+# Fast engineering verification; not intended for playing strength.
+board_size: 3
+komi: 0.5
+device: auto
+seed: 7
+model:
+  width: 32
+  layers: 2
+  heads: 4
+  window: 3
+  global_every: 2
+search:
+  simulations: 8
+  batch_size: 4
+  temperature_moves: 8
+train:
+  batch_size: 8
+  replay_positions: 10000

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "pybind11>=2.12"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transformer-go"
+version = "0.1.0"
+description = "Transformer Go with native C++ MCTS and PyTorch Metal acceleration"
+requires-python = ">=3.11"
+dependencies = ["torch>=2.3", "numpy>=1.26", "PyYAML>=6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pybind11>=2.12"]
+
+[project.scripts]
+transformer-go = "transformer_go.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["transformer_go*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

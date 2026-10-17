@@ -1,0 +1,17 @@
+board_size: 9
+komi: 7.5
+device: auto
+seed: 42
+model:
+  width: 192
+  layers: 8
+  heads: 6
+  window: 5
+  global_every: 2
+search:
+  simulations: 200
+  batch_size: 16
+  temperature_moves: 20
+train:
+  batch_size: 128
+  lr: 0.0002

@@ -1,0 +1,2 @@
+include cpp/native.cpp
+recursive-include cpp/vendor/katago *.h *.cpp *.hpp *.md LICENSE CONTRIBUTORS
