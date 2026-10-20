@@ -1,4 +1,6 @@
 import io
+import json
+from pathlib import Path
 import numpy as np
 import pytest
 import torch
@@ -41,8 +43,27 @@ def test_selfplay_train_resume_sgf_roundtrip(tmp_path):
     restored, saved_config, payload = load_checkpoint(output, torch.device("cpu"))
     assert payload["step"] == 2 and saved_config.to_dict() == config.to_dict()
     assert payload["training_origin"] == "random_init_selfplay"
+    assert "summary" in metrics
+    summary_path = Path(metrics["summary"]["summary_path"])
+    assert summary_path.exists()
+    summary = json.loads(summary_path.read_text())
+    assert summary["steps"] == 2 and summary["mean"]["total"] > 0
+    log_path = Path(summary["metrics_path"])
+    original_log = log_path.read_bytes()
+    logged = [json.loads(line) for line in original_log.splitlines()]
+    assert [entry["step"] for entry in logged] == [1, 2]
+    for key in ("total", "policy", "value", "score", "ownership", "moves", "grad_norm"):
+        values = [entry[key] for entry in logged]
+        assert summary["mean"][key] == pytest.approx(np.mean(values))
+        assert summary["min"][key] == min(values)
+        assert summary["max"][key] == max(values)
+        assert summary["last"][key] == values[-1]
     metrics = train(config, restored, torch.device("cpu"), tmp_path/"replay", output, 1, payload, lambda _: None)
     assert metrics["step"] == 3
+    assert metrics["summary"]["start_step"] == metrics["summary"]["end_step"] == 3
+    assert Path(metrics["summary"]["summary_path"]) != summary_path
+    assert log_path.read_bytes() == original_log
+    assert json.loads(Path(metrics["summary"]["metrics_path"]).read_text())["step"] == 3
     seed_all(config.seed)
     continuous = PolicyValueNet(config.model)
     train(config, continuous, torch.device("cpu"), tmp_path/"replay", tmp_path/"continuous.pt", 3, report=lambda _: None)

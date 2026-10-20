@@ -1,13 +1,13 @@
-# 接续（2026-10-20）
+# 最新接续：KataGo 式探索与 loss（2026-10-21）
 
-用户授权的“跨局面集中批量推理 + MCTS 子树复用”已实现，代码尚未提交。先看 README.md、IMPLEMENTATION.md、changes.md 的最新记录，早期 CPU 测试数量/规则实现描述已过时。
+用户授权的策略优化和逐轮 loss 已完成。先看 README 的“自博弈探索策略”“每轮训练 loss”、protocol.md 最新节和 changes.md。之前评估 SGF、零温度观棋及 diagnostics-2026-10-20.md 均保留；未提交本轮改动，未停止/重启用户训练，未改原 run 权重/replay。
 
-- 规则使用 vendored KataGo Board/BoardHistory，模型为 PyTorch；训练仅随机初始化和自身对局。
-- 多 worker 是 spawn CPU 搜索进程，父进程集中推理线程每个模型只加载一次；按 model key/几何合批。selfplay 用一个模型，evaluation 的 candidate/baseline 分开批次和两棵树，每手两树都 advance。
-- C++ Search 的 reuse=True 持久树按完整着法来源校验。目标预算包含保留的子边访问，返回 new_simulations/reused_simulations；根噪声每次从 base priors 重建。失败回调清树。
-- selfplay/evaluate 自动复用；Search.run 默认 fresh，Python search 不传 session 也是 fresh。权重若原地变化，调用方必须 reset 会话。
-- --inference-batch-size 默认 256、--inference-wait-ms 默认 2，只用于多 worker，不改 Config/checkpoint；旧 checkpoint 可继续训练。推理统计见 selfplay inference_summary、evaluation inference。
-- 已重新编译 native，全套 109 passed、5 skipped；MPS 在当前沙箱 unavailable。真实并行 CLI 自博弈 2 局→训练 1 step→评测 2 局通过，config 一致。未改现有 runs/zero-9x9。
-- 基准 `.venv/bin/python -m benchmarks.search_optimizations`：CPU smoke 5x5/8手/64模拟，树复用 NN 518→489；4 worker 集中调用 548→138，平均 batch 3.79→15.04，但搜索 0.281→0.442 s。不要将减少调用次数等同已证实 GPU 提速。
+- 默认 selfplay/loop runtime profile 为 katago，支持 --selfplay-policy legacy；不改 Config/checkpoint。温度 .75→.15、半衰期棋盘边长；根噪声采用总 concentration 10.83 的半均匀/半 log-policy 塑形；混合权重沿用 config。
+- cpp/native.cpp 回顾性权重修正为简化 PUCT 的近似移植，未包括 LCB、分叉局或廉价搜索。原始 visits/policy/树预算不变，新增 selection_weights/selection_policy；selfplay 以未加温度的 selection_policy 为训练目标，温度只控制落子。保留高价值单访问点，不用概率硬门槛。
+- training_metrics.py 每步 flush steps.jsonl，训练/模型保存成功后原子 summary.json。loop 在评估前追加 training-loss.csv，完整 iteration JSON 含 training 汇总。每次尝试独立 steps-START-* 目录，重复轮次可有多条 CSV；失败训练只留已完成步骤。独立 train 支持 --metrics-dir。
+- 原 loop 命令可继续用，新进程默认启用新策略和日志；已运行的旧进程不热更新。旧四参数 actor 提交缺省 legacy 保持原 parent 行为，新 parent 显式传 profile。旧日志不能从 checkpoint 还原；旧 replay 策略标签不转换。
+- native 已编译；专项 56 passed，全套 138 passed、5 skipped（当前工具环境 MPS 不可用）。临时真实并行 katago→串行 legacy 两轮通过：4 局 replay、4 局评估，训练 step 2→4，CSV 2 行。验证中断保留、续训不覆盖、汇总正确、树预算/软目标。目录见 changes.md。
+- 前一需求已支持 evaluation/iteration-NNNN/match-*/ SGF 和独立 eval --temperature 0。默认评估保持 .5→.2、无根噪声、原始访问次数选点；不要把训练 profile 当成完整 KataGo 评估引擎。
+- 9x9 诊断棋谱仍在 runs/zero-9x9/inspection/match-42-_1_10ews/，为当时 best 快照新生成的两盘零温度对局，非历史评估恢复。早期集中推理/树复用、CPU 基准与完整 SHA 见 changes.md。
 
-后续：目标设备运行基准，使用 `--config configs/tiny.yaml --device mps --board-size 9 --simulations 200 --workers 4`，调 batch/等待/worker。全套测试 `.venv/bin/python -m pytest -q`；native 改动后 `.venv/bin/python setup.py build_ext --inplace`。没有长期棋力结论。
+后续仅有实验性工作：固定预算做新旧策略棋力 A/B，目标 MPS/CUDA 基准，监测 loss 与评估而非单凭棋谱观感。没有证实棋力提高或 GPU 提速；测试入口 .venv/bin/python -m pytest -q，native 修改后需 setup.py build_ext --inplace。

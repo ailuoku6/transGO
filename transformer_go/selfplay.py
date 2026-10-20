@@ -4,6 +4,7 @@ from ._native import Board
 from .search import search, choose_action, SearchSession
 from .data import write_shard
 from .sgf import dumps
+from .exploration import validate_profile, selfplay_temperature, exploration_settings
 
 
 def validate_min_moves(board_size, min_moves, max_moves=None):
@@ -15,22 +16,31 @@ def validate_min_moves(board_size, min_moves, max_moves=None):
 
 
 def play_game(config, evaluator, seed, model_version="untrained", max_moves=None, min_moves=0,
-              score_utility=0.0):
+              score_utility=0.0, selfplay_policy="katago"):
     validate_min_moves(config.board_size, min_moves, max_moves)
+    validate_profile(selfplay_policy)
     rng = np.random.default_rng(seed)
     board = Board(config.board_size, config.komi, config.rules)
     records, actions = [], []
     session = SearchSession()
     max_moves = 4*board.size*board.size+100 if max_moves is None else max_moves
     early_forced_passes = 0
+    removed_mass, raw_tail_mass, target_tail_mass = [], [], []
     for t in range(max_moves):
-        result = search(board, evaluator, config.search, int(rng.integers(2**31)), noise=True,
-                        min_moves=min_moves, score_utility=score_utility, session=session)
-        temperature = 1.0 if t < config.search.temperature_moves else 0.1
-        action = choose_action(result["policy"], temperature, rng)
+        result = search(board, evaluator, config.search, seed=int(rng.integers(2**31)), noise=True,
+                        min_moves=min_moves, score_utility=score_utility, session=session,
+                        shaped_noise=selfplay_policy == "katago", policy_correction=selfplay_policy == "katago")
+        temperature = selfplay_temperature(t, board.size, selfplay_policy, config.search.temperature_moves)
+        target = np.asarray(result["selection_policy"], dtype=np.float64)
+        action = choose_action(target, temperature, rng)
+        tail = np.asarray(result["visits"]) == 1
+        raw_tail_mass.append(float(np.asarray(result["policy"])[tail].sum()))
+        target_tail_mass.append(float(target[tail].sum()))
+        removed_mass.append(1.0 - sum(result["selection_weights"]) / result["simulations"])
         if action == board.size*board.size and t < min_moves:
             early_forced_passes += 1
-        records.append((board.features(), board.legal_mask(), result["policy"], board.to_play))
+        # Temperature affects actual moves only; do not sharpen the training target.
+        records.append((board.features(), board.legal_mask(), target, board.to_play))
         actions.append(action)
         board = board.play(action)
         session.advance(action)
@@ -59,21 +69,26 @@ def play_game(config, evaluator, seed, model_version="untrained", max_moves=None
             "adjudication_engine": formal["adjudication_engine"],
             "score_utility": score_utility,
             "tree_reuse": True, "search_budget": "retained-plus-new-edge-visits",
+            "exploration": exploration_settings(config, selfplay_policy),
+            "policy_correction_stats": {"mean_removed_visit_mass": float(np.mean(removed_mass)),
+                                        "mean_raw_single_visit_mass": float(np.mean(raw_tail_mass)),
+                                        "mean_target_single_visit_mass": float(np.mean(target_tail_mass))},
             "early_forced_passes": early_forced_passes}
     return data, meta, dumps(n, config.komi, actions, score, config.rules)
 
 
 def generate(config, evaluator, directory, games=1, seed=None, model_version="untrained", report=print,
-             min_moves=0, score_utility=0.0):
+             min_moves=0, score_utility=0.0, selfplay_policy="katago"):
     if games < 1:
         raise ValueError("games must be positive")
     validate_min_moves(config.board_size, min_moves)
+    validate_profile(selfplay_policy)
     completed, attempts = [], 0
     while len(completed) < games and attempts < games*10:
         game_seed = (config.seed if seed is None else seed) + attempts
         attempts += 1
         result = play_game(config, evaluator, game_seed, model_version, min_moves=min_moves,
-                           score_utility=score_utility)
+                           score_utility=score_utility, selfplay_policy=selfplay_policy)
         if result is None:
             report({"event": "truncated_game_discarded", "seed": game_seed})
             continue
@@ -84,6 +99,7 @@ def generate(config, evaluator, directory, games=1, seed=None, model_version="un
         report({"event": "game_completed", "path": str(path), "moves": meta["moves"],
                 "score_black": meta["score_black"], "min_moves": min_moves,
                 "score_utility": score_utility,
+                "selfplay_policy": selfplay_policy, "policy_correction_stats": meta["policy_correction_stats"],
                 "early_forced_passes": meta["early_forced_passes"]})
     if len(completed) < games:
         raise RuntimeError("too many truncated games: increase search quality/max moves before training")

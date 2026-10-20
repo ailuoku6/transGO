@@ -73,6 +73,42 @@ transformer-go doctor
 
 当前闭环按轮执行，并非跨机器异步集群；不要同时对同一个 loop 目录启动多个 learner。
 
+## 自博弈探索策略
+
+`selfplay` 和 `loop` 默认使用 `--selfplay-policy katago`。该运行时选项不进入 Config/checkpoint，因此可以接续原来的 `best.pt`、`learner.pt` 和 replay。新策略包含：
+
+- 落子温度从 `0.75` 平滑衰减到 `0.15`，公式为 `T(t)=0.15+0.60×0.5^(t/N)`，`t` 是已落子总手数，`N` 是棋盘边长；9 路半衰期为 9 手。较低温度减少低访问点合计占据大量采样概率的情况，仍保留探索。
+- 根节点使用按网络策略塑形的 Dirichlet 噪声，总 concentration 为 `10.83`，一半均匀、一半按截断后的 log policy 分配；混合权重沿用 `search.dirichlet_epsilon`。
+- 搜索完成后，参照 KataGo 回顾性修正减少低效探索的选点权重。实际落子从修正权重按温度抽样，训练策略目标则是修正权重直接归一化，**不再按落子温度锐化**。低访问但高价值的候选仍可保留，不设置一刀切的 1% 概率门槛。
+
+这部分对照本地 KataGo `d91ea855` 的 `cpp/configs/training/selfplay1_maxsize9.cfg`、`searchhelpers.cpp`、`searchresults.cpp` 和 `searchexplorehelpers.cpp`。温度/噪声方案取自该示例，权重修正则适配本项目简化 PUCT，是近似移植；尚未移植 LCB、分叉局和廉价搜索等完整训练机制。当前 tiny 配置的 200 次访问预算不变，也尚无棋力提升的 A/B 结论。
+
+原始 `visits`、`policy` 和树复用统计保持搜索的真实访问数；新增 `selection_weights`、`selection_policy` 表示修正后的选点/目标权重。replay 元数据保存 `exploration` 和 `policy_correction_stats`，`game_completed` 也输出平均修正量与单访问点的权重占比。评估/晋级仍用既有无根噪声协议，独立 `eval --temperature 0` 仍选原始最高访问次数。
+
+需要对照旧方案时，在原命令末尾添加 `--selfplay-policy legacy`，恢复前 `search.temperature_moves` 手温度 1、此后 0.1、对称 Dirichlet 噪声和原始访问分布目标。旧 replay 保留原有策略标签，新数据随生成逐步进入 replay window。
+
+本次修改包含 C++ 搜索，需使用重新编译的 native 扩展。运行中的旧 loop 不会热加载新策略；在合适的轮次边界结束后重新启动原命令，默认即使用新策略并接续已有训练状态。
+
+## 每轮训练 loss
+
+`loop` 自动保存 loss，不需要额外参数。例如 `--output runs/zero-9x9`：
+
+```text
+runs/zero-9x9/training-loss.csv
+runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/steps.jsonl
+runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/summary.json
+```
+
+- `training-loss.csv`：每次完成训练追加一行，包含轮次、起止训练 step、采样池局面数，以及各项的整轮均值和最后一步值。训练结束即写入，无需等待评估完成。
+- `steps.jsonl`：每个训练步记录 `total/policy/value/score/ownership/moves/grad_norm`，逐步 flush；训练中断时已写步骤仍保留。
+- `summary.json`：训练和 candidate checkpoint 保存成功后原子写入，包含上述指标的 mean/min/max/last、各损失权重、设备和日志路径；完整轮次的 `iteration-NNNN.json` 也包含该汇总。
+
+续训会创建新的日志子目录。若一轮在评估期间中断、重跑同一轮，CSV 保留不同训练尝试，以起止 step 和 `summary_path` 区分，不覆盖旧日志。训练中途失败的尝试没有 completed summary，也不追加完成行。
+
+单独 `train` 默认写到 `OUTPUT_PARENT/training/OUTPUT_STEM/steps-*`，可通过 `--metrics-dir` 指定目录。终端仍输出训练进度，训练完成时额外输出 `training_summary`。新日志从运行更新后的代码开始记录，旧版本未持久化的逐步 loss 不能从 checkpoint 还原。
+
+各分项 loss 为加权前数值；`total` 是按 summary 中权重求和的优化目标，`grad_norm` 是裁剪前梯度范数。replay 分布会随训练变化，因此 loss 趋势需要结合评估结果判断，不能单凭下降认定棋力提高。
+
 ## 并行自博弈与评估
 
 ```bash
@@ -107,6 +143,40 @@ transformer-go doctor
 
 集中合批只在多个 worker 时启用；单 worker 直接调用模型，也会自动复用子树。MPS/Metal 可先从 2～4 个 worker 测量，评估中每个模型要有多个请求同时就绪才能合批。`search.batch_size` 仍控制单树叶子批量，`--inference-batch-size` 是跨局面上限，增大上限本身不保证满批。checkpoint 提供完整的自博弈模型及搜索配置，`--config` 的 device 字段决定本次运行设备。训练器继续在父进程中单进程运行。
 
+## 查看评估棋谱
+
+新的 loop 进程会自动把每盘计分的评估对局保存到输出目录下的
+evaluation/iteration-NNNN/match-SEED-唯一后缀/game-NNNN.sgf。
+例如输出目录为 runs/zero-9x9 时，棋谱就在其 evaluation 子目录中。
+每盘结束后立即写入，evaluation_game 日志含 sgf_path，iteration JSON 的
+evaluation.sgf_dir 指向本次比赛目录。SGF 可用支持 SGF 的围棋看谱工具打开。
+重跑同一轮会新建比赛目录；并行提前停止后被丢弃、未计分的局不导出。
+评估棋谱与 replay 分开，不作为训练数据。
+
+SGF 记录双方 checkpoint 名称及 SHA-256、执色、种子、胜负/目差、搜索预算和温度。
+每手注释包含 MCTS 首选坐标、首选访问次数、实际着法访问次数、实际着法是否达到最高访问次数（含并列）。
+达到手数上限时会标明 forced_scored 和 move_limit，只保存真实着法，不补造 pass；无结果记录为 Void，和棋为 0。
+
+默认晋级评估关闭根噪声，但仍以 0.5 衰减到 0.2 的温度抽样，因此并非每手都下访问次数最多的点。
+想看当前 best 在每手都选择 MCTS 最高访问次数时的棋风，可独立运行两盘观棋对局：
+
+~~~bash
+.venv/bin/transformer-go eval \
+  --config configs/tiny.yaml \
+  --candidate runs/zero-9x9/best.pt \
+  --baseline runs/zero-9x9/best.pt \
+  --games 2 --workers 2 --temperature 0 \
+  --score-utility 0.05 --sgf-dir runs/zero-9x9/inspection
+~~~
+
+独立 eval 默认保存到 runs/evaluation，可用 --sgf-dir 改位置。
+--temperature 0 只表示当前模型和搜索预算下的访问次数首选，不保证客观最优；也不等于原始网络策略概率最高的点。
+该参数仅用于独立诊断，不能与 --required-candidate-win-prop 同时使用，loop 的晋级规则不变。
+双方用同一模型、空盘和零温度时，对局可能重复，不适合用这种对局的胜率判断棋力提升。
+
+评估棋谱导出本身只涉及 Python；自博弈策略更新还涉及 native 编译。已经运行的 loop 不会自动加载修改，需在合适的轮次边界退出后重新启动原命令；
+新进程会接续已有 checkpoint。此前未保存的评估对局不能直接补回，重新对战属于新生成的棋谱。
+
 ## 从零开始的训练路线
 
 空的运行目录会随机初始化网络，随后反复执行：
@@ -120,7 +190,7 @@ transformer-go doctor
   -> 达到门槛后晋级，继续自博弈
 ```
 
-无需下载人类棋谱或预训练权重。策略目标来自 MCTS 访问次数，价值目标来自实际终局；目数、归属和剩余手数也只从同一盘自博弈生成。最早几轮随机网络可能很弱或频繁 pass，这是冷启动阶段需要用探索、更多对局与评测观察的问题。
+无需下载人类棋谱或预训练权重。策略目标来自 MCTS 访问权重（默认经过回顾性修正），价值目标来自实际终局；目数、归属和剩余手数也只从同一盘自博弈生成。最早几轮随机网络可能很弱或频繁 pass，这是冷启动阶段需要用探索、更多对局与评测观察的问题。
 
 ```bash
 .venv/bin/transformer-go loop \
@@ -188,7 +258,7 @@ benchmark 包含一次预热并同步 GPU，报告该配置下的搜索速度、
 - 默认使用 KataGo `Chinese-OGS` 规则：面积计分、禁止自杀、**位置超级劫（PSK）**、双 pass 终局；`rules: japanese` 使用 KataGo 的 territory + seki tax + 三阶段 encore；也可传 KataGo 的 JSON/legacy rules 字符串。
 - C++ 原生规则层直接编译 KataGo 的 `Board`、`BoardHistory`、`Rules` 及其依赖。终局裁定会按 pass-alive/Benson、独立生命区域、seki、死子归属、territory encore、ko/suicide/button 配置计分；网络 ownership 只用于分析预测，不参与正式裁定。完整 KataGo 引擎还包含神经网络、分布式搜索和更多赛事协议，本项目只复用规则核心。KataGo 按许可证随项目一并分发所需源文件，版本和归属见 `cpp/vendor/katago/UPSTREAM.md`。
 - C++ 通过 KataGo 的精确棋盘/历史状态保存超级劫和 encore 历史，另提供确定性 Zobrist hash。特征含最近 8 个棋盘、合法点、最近落子、黑方行棋标志、视角贴目和进度，共 21 通道。
-- 策略为搜索访问分布，胜负类顺序为 `负/和/胜 = 0/1/2`；价值、目数与归属均以样本当前行棋方为视角。
+- 策略为搜索访问权重分布（`katago` 使用修正权重，`legacy` 使用原始访问次数），胜负类顺序为 `负/和/胜 = 0/1/2`；价值、目数与归属均以样本当前行棋方为视角。
 - score 和 moves-left 除以棋盘面积归一化；ownership 是 `对手/中立/当前方 = 0/1/2`。自博弈正常终局样本的 `aux_mask=1`。
 - 达到最大手数仍未终局的自博弈局丢弃；不会用强制 pass 制造训练标签。
 - 评估 gatekeeper 使用 KataGo 的 `maxMovesPerGame` 风格强制计分：超过评估手数上限的局面通过 `BoardHistory` 当前分数计入 match points；无结果局按 0.5 分计入双方。自博弈仍丢弃未正式终局的局，避免把强制评估裁定混入训练标签。
@@ -197,5 +267,7 @@ benchmark 包含一次预热并同步 GPU，报告该配置下的搜索速度、
 - 局部注意力当前用 dense attention mask 实现，表达局部先验但没有稀疏窗口算子的性能收益；C++ 单树批量搜索使用叶子预留/虚拟损失，尚未实现多线程共享树。
 
 ## 已验证
+
+2026-10-21：KataGo 式自博弈探索和 loss 持久化已编译并通过全套测试，138 passed、5 skipped（当前工具环境 MPS 不可用）。独立临时目录真实 CLI 完成并行 `katago` 一轮，再以串行 `legacy` 续跑一轮；训练 step 2→4，保存 4 局 replay、4 局评估棋谱和 2 行 loss 汇总，原 Config 一致。日志均值/极值/最后值、断点续训不覆盖、失败保留逐步日志已验证。尚未进行棋力 A/B 或本次 GPU 实测。
 
 2026-10-15 在当前 Apple Silicon Mac 上验证了：C++ 编译、独立 Python 规则 oracle 对照、提子/禁入/超级劫/计分、搜索访问数与价值视角、SGF 往返、CPU 自博弈与断点续训、并行 actor、完整候选评测闭环，以及真实 Metal 自博弈训练。Metal 专项测试覆盖 9x9/13x13/19x19 前向/反向和优化器续训。没有进行长期棋力训练，也没有验证达到任何业余段位或专业强度。

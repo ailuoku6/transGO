@@ -1,14 +1,26 @@
-"""Export and inspect self-play SGF records; SGF is not a training input."""
+"""Export and inspect game records; SGF is not a training input."""
 import re
 
 
-def dumps(size, komi, actions, score=None, rules="Chinese"):
-    result = "" if score is None else ("0" if score == 0 else f"{'B' if score>0 else 'W'}+{abs(score):g}")
-    rules = str(rules).replace("\\", "\\\\").replace("]", "\\]")
-    root = f"(;GM[1]FF[4]SZ[{size}]KM[{komi:g}]RU[{rules}]RE[{result}]"
+def _escape(value):
+    return str(value).replace("\\", "\\\\").replace("]", "\\]")
+
+
+def dumps(size, komi, actions, score=None, rules="Chinese", *, result=None,
+          black_name=None, white_name=None, comment=None, move_comments=None):
+    if result is None:
+        result = "" if score is None else ("0" if score == 0 else f"{'B' if score>0 else 'W'}+{abs(score):g}")
+    root = f"(;GM[1]FF[4]CA[UTF-8]SZ[{size}]KM[{komi:g}]RU[{_escape(rules)}]RE[{_escape(result)}]"
+    for name, value in (("PB", black_name), ("PW", white_name), ("C", comment)):
+        if value is not None:
+            root += f"{name}[{_escape(value)}]"
+    if move_comments is not None and len(move_comments) != len(actions):
+        raise ValueError("move comments must match the number of actions")
     for i, action in enumerate(actions):
         point = "" if action == size*size else chr(97+action % size) + chr(97+action // size)
         root += f";{'B' if i % 2 == 0 else 'W'}[{point}]"
+        if move_comments is not None:
+            root += f"C[{_escape(move_comments[i])}]"
     return root + ")\n"
 
 

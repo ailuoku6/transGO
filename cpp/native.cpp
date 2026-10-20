@@ -325,6 +325,68 @@ struct Node {
     }
 };
 
+// KataGo d91ea855 searchhelpers.cpp: half uniform alpha, half allocated by
+// clipped log policy. Keep the total concentration independent of board size.
+static std::vector<double> shaped_dirichlet_alphas(
+    const std::vector<double>& priors, const std::vector<int>& legal, double concentration=10.83
+) {
+    if(priors.size()!=legal.size() || !std::isfinite(concentration) || concentration<=0)
+        throw std::invalid_argument("invalid Dirichlet inputs");
+    std::vector<double> alphas(priors.size(),0.0);
+    int count=0; double log_sum=0.0;
+    for(size_t a=0;a<priors.size();++a) if(legal[a]) {
+        if(!std::isfinite(priors[a]) || priors[a]<0)
+            throw std::invalid_argument("invalid Dirichlet policy");
+        alphas[a]=std::log(std::min(0.01,priors[a])+1e-20);
+        log_sum+=alphas[a]; count++;
+    }
+    if(count==0) throw std::invalid_argument("Dirichlet requires a legal move");
+    double shaped_sum=0.0;
+    for(size_t a=0;a<alphas.size();++a) if(legal[a]) {
+        alphas[a]=std::max(0.0,alphas[a]-log_sum/count);
+        shaped_sum+=alphas[a];
+    }
+    for(size_t a=0;a<alphas.size();++a) if(legal[a])
+        alphas[a]=concentration*(shaped_sum>0 ? 0.5*(1.0/count+alphas[a]/shaped_sum) : 1.0/count);
+    return alphas;
+}
+
+// Adapt KataGo's retrospective selection correction to our unweighted PUCT.
+// All q values are in the root player's perspective. This changes returned
+// selection/target weights, never the stored tree visits or backed-up values.
+static std::vector<double> corrected_selection_weights(
+    const std::vector<int>& visits, const std::vector<double>& q,
+    const std::vector<double>& priors, double explore_scaling
+) {
+    if(visits.empty() || visits.size()!=q.size() || visits.size()!=priors.size() ||
+       !std::isfinite(explore_scaling) || explore_scaling<0)
+        throw std::invalid_argument("invalid selection inputs");
+    int best=-1; double best_goodness=-1e100;
+    std::vector<double> weights(visits.begin(),visits.end());
+    for(size_t a=0;a<visits.size();++a) {
+        if(visits[a]<0 || !std::isfinite(q[a]) || !std::isfinite(priors[a]) || priors[a]<0)
+            throw std::invalid_argument("invalid selection statistics");
+        if(visits[a]>0) {
+            double goodness=visits[a]-1.0+2.0*priors[a];
+            if(goodness>best_goodness) { best=static_cast<int>(a); best_goodness=goodness; }
+        }
+    }
+    if(best<0) throw std::invalid_argument("selection requires a visited move");
+    const double best_puct=q[best]+explore_scaling*priors[best]/(1.0+visits[best]);
+    for(size_t a=0;a<weights.size();++a) if(visits[a]>0 && static_cast<int>(a)!=best) {
+        const double gap=best_puct-q[a];
+        if(gap>0) {
+            const double wanted=std::max(0.0,explore_scaling*priors[a]/gap-1.0);
+            weights[a]=std::ceil(std::min(weights[a],wanted));
+        }
+    }
+    // chosenMoveSubtract=0, chosenMovePrune=1. Upstream uses strict <,
+    // not <=: do not blindly delete every move visited once.
+    const double threshold=std::min(1.0,*std::max_element(weights.begin(),weights.end())/64.0);
+    for(double& weight:weights) if(weight<threshold) weight=0.0;
+    return weights;
+}
+
 class Search {
     double c_puct, virtual_loss;
     std::mt19937 rng;
@@ -389,9 +451,11 @@ public:
         return true;
     }
     py::dict run(const GoBoard& board,py::function evaluator,int simulations=200,int batch_size=16,
-                 double alpha=0.15,double epsilon=0.0,int min_moves=0,double score_utility=0.0,bool reuse=false) {
+                 double alpha=0.15,double epsilon=0.0,int min_moves=0,double score_utility=0.0,bool reuse=false,
+                 bool shaped_noise=false,bool policy_correction=false) {
         try {
-            return run_impl(board,evaluator,simulations,batch_size,alpha,epsilon,min_moves,score_utility,reuse);
+            return run_impl(board,evaluator,simulations,batch_size,alpha,epsilon,min_moves,score_utility,reuse,
+                            shaped_noise,policy_correction);
         } catch(...) {
             // Failed callbacks may leave reservations or partially backed-up
             // batches. Discard all of them before the next request.
@@ -400,7 +464,8 @@ public:
     }
 private:
     py::dict run_impl(const GoBoard& board,py::function evaluator,int simulations,int batch_size,
-                     double alpha,double epsilon,int min_moves,double score_utility,bool reuse) {
+                     double alpha,double epsilon,int min_moves,double score_utility,bool reuse,
+                     bool shaped_noise,bool policy_correction) {
         if(board.terminal() || simulations<1 || batch_size<1 || min_moves<0 || !std::isfinite(alpha) || !std::isfinite(epsilon) ||
            !std::isfinite(score_utility) || alpha<=0 || epsilon<0 || epsilon>1 || score_utility<0)
             throw std::invalid_argument("invalid search request");
@@ -449,7 +514,14 @@ private:
         if(epsilon>0) {
             std::gamma_distribution<double> gamma(alpha,1.0);
             const auto& mask=root.legal;std::vector<double> noise(mask.size(),0);double total=0;
-            for(size_t a=0;a<mask.size();++a) if(mask[a]) {noise[a]=gamma(rng);total+=noise[a];}
+            const auto alphas=shaped_noise ? shaped_dirichlet_alphas(root.base_priors,mask) : std::vector<double>();
+            for(size_t a=0;a<mask.size();++a) if(mask[a]) {
+                if(shaped_noise) {
+                    std::gamma_distribution<double> shaped_gamma(alphas[a],1.0);
+                    noise[a]=shaped_gamma(rng);
+                } else noise[a]=gamma(rng);
+                total+=noise[a];
+            }
             if(total<=0 || !std::isfinite(total)) throw std::invalid_argument("Dirichlet noise underflow: increase alpha");
             for(size_t a=0;a<mask.size();++a) root.priors[a]=(1-epsilon)*root.priors[a]+epsilon*noise[a]/total;
         }
@@ -477,10 +549,20 @@ private:
         }
         std::vector<int> visits(root.children.size(),0);
         std::vector<double> policy(root.children.size(),0);
+        std::vector<double> action_values(root.children.size(),0);
         for(size_t a=0;a<visits.size();++a) if(root.children[a]) {
             visits[a]=root.children[a]->visits;policy[a]=static_cast<double>(visits[a])/done;
+            if(visits[a]>0) action_values[a]=-root.children[a]->value_sum/visits[a];
         }
+        auto weights=policy_correction ? corrected_selection_weights(
+            visits,action_values,root.priors,c_puct*std::sqrt(static_cast<double>(root.visits+1))) :
+            std::vector<double>(visits.begin(),visits.end());
+        const double weight_sum=std::accumulate(weights.begin(),weights.end(),0.0);
+        std::vector<double> selection_policy=weights;
+        for(double& p:selection_policy) p/=weight_sum;
         py::dict result;result["visits"]=visits;result["policy"]=policy;
+        result["selection_weights"]=weights;result["selection_policy"]=selection_policy;
+        result["action_values"]=action_values;result["root_priors"]=root.priors;
         result["value"]=root.value_sum/root.visits;result["simulations"]=done;
         result["reused_simulations"]=reused;result["new_simulations"]=done-reused;
         if(!reuse) reset();
@@ -514,5 +596,10 @@ PYBIND11_MODULE(_native,m) {
         .def("reset",&Search::reset).def("advance",&Search::advance).def("reseed",&Search::reseed)
         .def("run",&Search::run,py::arg("board"),py::arg("evaluator"),py::arg("simulations")=200,
              py::arg("batch_size")=16,py::arg("alpha")=0.15,py::arg("epsilon")=0.0,
-             py::arg("min_moves")=0,py::arg("score_utility")=0.0,py::arg("reuse")=false);
+             py::arg("min_moves")=0,py::arg("score_utility")=0.0,py::arg("reuse")=false,
+             py::arg("shaped_noise")=false,py::arg("policy_correction")=false);
+    m.def("shaped_dirichlet_alphas",&shaped_dirichlet_alphas,
+          py::arg("priors"),py::arg("legal"),py::arg("concentration")=10.83);
+    m.def("corrected_selection_weights",&corrected_selection_weights,
+          py::arg("visits"),py::arg("q"),py::arg("priors"),py::arg("explore_scaling"));
 }

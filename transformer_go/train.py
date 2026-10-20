@@ -1,9 +1,11 @@
 import json
+from pathlib import Path
 import numpy as np
 import torch
 from torch.nn import functional as F
 from .data import load_replay, augment
 from .checkpoint import save_checkpoint, require_selfplay_origin
+from .training_metrics import TrainingLog
 
 
 def losses(outputs, batch, config):
@@ -24,7 +26,8 @@ def losses(outputs, batch, config):
     return {"total": total, "policy": policy, "value": value, "score": score, "ownership": ownership, "moves": moves}
 
 
-def train(config, model, device, directory, output, steps=100, resume=None, report=print):
+def train(config, model, device, directory, output, steps=100, resume=None, report=print,
+          *, metrics_dir=None, iteration=None):
     if steps < 1 or config.train.batch_size < 1 or config.train.replay_positions < 1:
         raise ValueError("invalid training budget")
     if resume is not None:
@@ -42,21 +45,32 @@ def train(config, model, device, directory, output, steps=100, resume=None, repo
         torch.set_rng_state(resume["torch_rng"])
     model.train()
     metrics = {}
-    for step in range(start+1, start+steps+1):
-        indices = rng.integers(len(replay["value"]), size=config.train.batch_size)
-        batch = augment({k: v[indices] for k, v in replay.items()}, rng)
-        batch = {k: torch.from_numpy(np.ascontiguousarray(v)).to(device) for k, v in batch.items()}
-        optimizer.zero_grad(set_to_none=True)
-        outputs = model(batch["features"].float(), batch["legal"])
-        loss = losses(outputs, batch, config.train)
-        if not torch.isfinite(loss["total"]):
-            raise FloatingPointError("nonfinite training loss")
-        loss["total"].backward()
-        grad = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip, error_if_nonfinite=True)
-        optimizer.step()
-        metrics = {k: float(v.detach().cpu()) for k, v in loss.items()}
-        metrics.update(step=step, grad_norm=float(grad.cpu()), positions=len(replay["value"]), device=str(device))
-        if step == start+1 or step % 10 == 0 or step == start+steps:
-            report(metrics)
-    save_checkpoint(output, model, config, start+steps, optimizer, rng)
+    if metrics_dir is None:
+        metrics_dir = Path(output).parent / "training" / Path(output).stem
+    log = TrainingLog(metrics_dir, output, start, steps, iteration)
+    try:
+        for step in range(start+1, start+steps+1):
+            indices = rng.integers(len(replay["value"]), size=config.train.batch_size)
+            batch = augment({k: v[indices] for k, v in replay.items()}, rng)
+            batch = {k: torch.from_numpy(np.ascontiguousarray(v)).to(device) for k, v in batch.items()}
+            optimizer.zero_grad(set_to_none=True)
+            outputs = model(batch["features"].float(), batch["legal"])
+            loss = losses(outputs, batch, config.train)
+            if not torch.isfinite(loss["total"]):
+                raise FloatingPointError("nonfinite training loss")
+            loss["total"].backward()
+            grad = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip, error_if_nonfinite=True)
+            optimizer.step()
+            metrics = {k: float(v.detach().cpu()) for k, v in loss.items()}
+            metrics.update(step=step, grad_norm=float(grad.cpu()), positions=len(replay["value"]), device=str(device))
+            log.record(metrics)
+            if step == start+1 or step % 10 == 0 or step == start+steps:
+                report(metrics)
+        save_checkpoint(output, model, config, start+steps, optimizer, rng)
+        metrics["summary"] = log.finish(metrics, {
+            "policy": 1.0, "value": 1.0, "score": config.train.score_weight,
+            "ownership": config.train.ownership_weight, "moves": config.train.moves_weight})
+        report(metrics["summary"])
+    finally:
+        log.close()
     return metrics

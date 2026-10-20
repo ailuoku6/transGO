@@ -82,13 +82,13 @@ class SearchSession:
 
 
 def search(board: Board, evaluator, config: SearchConfig, seed=0, noise=False, min_moves=0,
-           score_utility=0.0, session=None):
+           score_utility=0.0, session=None, *, shaped_noise=False, policy_correction=False):
     tree = (Search(config.c_puct, config.virtual_loss, seed) if session is None
             else session.prepare(config, seed))
     return tree.run(
         board, evaluator, config.simulations, config.batch_size,
         config.dirichlet_alpha, config.dirichlet_epsilon if noise else 0.0, min_moves, score_utility,
-        reuse=session is not None,
+        reuse=session is not None, shaped_noise=shaped_noise, policy_correction=policy_correction,
     )
 
 

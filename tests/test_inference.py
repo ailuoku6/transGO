@@ -141,13 +141,18 @@ def test_real_parallel_evaluation_uses_central_models(tmp_path):
     result = evaluate_parallel(config, checkpoint, checkpoint, games=4, workers=2,
                                device="cpu", max_moves=2, report=lambda _: None,
                                inference_batch_size=8, inference_wait_ms=5,
-                               required_candidate_win_prop=0)
+                               required_candidate_win_prop=0, sgf_dir=tmp_path / "evaluation")
     assert result["played"] == 1 and result["early_stopped"]
     assert result["gating"]["decision"] == "accepted"
     assert result["play_settings"]["inference"] == "central-batched"
     assert set(result["inference"]) == {"candidate", "baseline"}
     assert all(stats["positions"] > 0 for stats in result["inference"].values())
     assert not any(t.name == "central-inference" for t in threading.enumerate())
+    from pathlib import Path
+    from transformer_go.sgf import parse
+    files = list(Path(result["sgf_dir"]).glob("*.sgf"))
+    assert len(files) == result["played"] == 1
+    assert len(parse(files[0].read_text())) == 3
 
 
 def test_array_evaluator_matches_board_evaluator():

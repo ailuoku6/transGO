@@ -1,6 +1,6 @@
 # 第一版实现状态
 
-更新：2026-10-20。
+更新：2026-10-21。
 
 | 模块 | 已实现 | 后续工作 |
 |---|---|---|
@@ -17,6 +17,10 @@
 `configs/smoke.yaml` 是工程验证配置；`configs/tiny.yaml` 是正式 9x9 起点。13x13/19x19 网络与规则尺寸已通过功能验证，尚未完成长期自博弈或棋力评估。高性能实现第一步使用 C++ 消除 Python 树遍历成本，并缓存节点合法动作；当前完整状态复制与精确超级劫历史复制仍可能成为大预算瓶颈，应以 profiler 结果决定优化次序。
 
 并行推理基准入口为 `benchmarks/search_optimizations.py`；它比较 fresh tree 和复用树，并比较每 worker 独立 forward 与父进程跨 worker 合批，报告准确调用数/吞吐与 merge rate。CPU 低负载有 IPC 开销；必须在目标 MPS/CUDA 设备和正式棋盘/模型上测量吞吐。
+
+2026-10-21 增量：默认自博弈使用 `katago` profile，含 0.75→0.15 平滑温度、policy-shaped Dirichlet 和适配简化 PUCT 的回顾性权重修正。实际树访问数不变，训练目标取修正权重归一化；`legacy` 可切回原方案。未实现 LCB、分叉局、廉价搜索等完整 KataGo 训练算法。每次训练保存全部 step 的 JSONL 和原子 summary，loop 在评估前追加 `training-loss.csv`，重跑使用独立子目录；日志不进入 checkpoint schema。评估同时支持 SGF 和独立零温度观棋，详见 README。
+
+最新验证：native 已重新编译，全套 138 passed、5 skipped（MPS 不可用）；临时真实 CLI 的并行 katago→串行 legacy 续跑两轮通过，4 局自博弈、4 局评估、训练 step 2→4、2 行 loss 记录。验证覆盖中断日志保留、续训不覆盖、原始访问预算/树复用、软策略训练目标。未修改运行中的长训练、已有权重或 replay，尚无棋力 A/B 结论。
 
 与最初研究方案的明确调整：macOS 用 MPS 而非 TensorRT；v1 采用 float32 而非默认 BF16；训练 uncertainty 使用 Gaussian NLL，避免只输出而不训练方差头；ownership 为三分类，正确保留中立点；按用户要求取消人类棋谱预训练；训练只接受自博弈数据，从随机网络启动。以上均由接口与数值正确性需要决定。
 

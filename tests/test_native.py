@@ -50,3 +50,35 @@ def test_score_utility_is_optional_and_uses_leaf_score():
         Search().run(board, lambda boards: (np.ones((len(boards), 10), dtype=np.float32),
                                              np.zeros(len(boards), dtype=np.float32)),
                      4, 2, score_utility=0.1)
+
+
+def test_katago_shaped_dirichlet_and_policy_correction_are_deterministic():
+    from transformer_go._native import corrected_selection_weights, shaped_dirichlet_alphas
+
+    priors = np.array([.155, .005, .005, .835], dtype=np.float64)
+    legal = np.array([1, 1, 1, 1], dtype=np.int32)
+    alphas = np.asarray(shaped_dirichlet_alphas(priors, legal))
+    assert np.isclose(alphas.sum(), 10.83)
+    assert alphas[0] > alphas[1] and np.all(alphas > 0)
+
+    visits = np.array([31, 1, 1, 167], dtype=np.int32)
+    q = np.array([.1, -.1, -.1, .09], dtype=np.float64)
+    corrected = np.asarray(corrected_selection_weights(visits, q, priors, 20.0))
+    assert corrected.shape == visits.shape
+    assert np.all(corrected >= 0)
+    assert corrected[1] <= visits[1] and corrected[2] <= visits[2]
+    np.testing.assert_array_equal(corrected, [31, 0, 0, 167])
+
+
+def test_search_exposes_katago_selection_target_without_changing_visit_budget():
+    board = Board(3, .5)
+
+    def evaluator(boards):
+        return (np.ones((len(boards), 10), dtype=np.float32),
+                np.zeros(len(boards), dtype=np.float32))
+
+    result = Search(seed=7).run(board, evaluator, 32, 4, epsilon=.25,
+                                 shaped_noise=True, policy_correction=True)
+    assert result["simulations"] == sum(result["visits"]) == 32
+    assert np.isclose(sum(result["selection_policy"]), 1)
+    assert len(result["selection_weights"]) == 10

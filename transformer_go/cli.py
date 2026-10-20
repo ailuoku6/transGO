@@ -33,7 +33,7 @@ def cmd_selfplay(args):
                                   args.seed, min_moves=args.min_moves, score_utility=args.score_utility,
                                   report=report, device=device,
                                   inference_batch_size=args.inference_batch_size,
-                                  inference_wait_ms=args.inference_wait_ms)
+                                  inference_wait_ms=args.inference_wait_ms, selfplay_policy=args.selfplay_policy)
         report({"event": "parallel_selfplay_complete", "paths": paths})
         return
     model = PolicyValueNet(config.model).to(device)
@@ -44,7 +44,7 @@ def cmd_selfplay(args):
         version = "untrained"
     evaluator = Evaluator(model, device)
     generate(config, evaluator, args.output, args.games, args.seed, version, report,
-             min_moves=args.min_moves, score_utility=args.score_utility)
+             min_moves=args.min_moves, score_utility=args.score_utility, selfplay_policy=args.selfplay_policy)
     print(json.dumps({"event": "selfplay_complete", "evaluator_calls": evaluator.calls,
                       "positions": evaluator.positions, "device": str(device)}))
 
@@ -59,7 +59,8 @@ def cmd_train(args):
         model, loaded, resume = load_checkpoint(args.resume, device, selfplay_only=True)
         if loaded.to_dict() != config.to_dict():
             raise ValueError("resume checkpoint configuration differs from requested config")
-    train(config, model, device, args.data, args.output, args.steps, resume, report)
+    train(config, model, device, args.data, args.output, args.steps, resume, report,
+          metrics_dir=args.metrics_dir)
     print(json.dumps({"event": "training_complete", "checkpoint": args.output, "device": str(device)}))
 
 
@@ -81,6 +82,9 @@ def cmd_eval(args):
         raise ValueError("workers must be a positive integer")
     validate_batching(args.inference_batch_size, args.inference_wait_ms)
     device = select_device(config.device)
+    recording = {"sgf_dir": args.sgf_dir, "temperature": args.temperature,
+                 "candidate_name": f"{args.candidate} sha256={model_version(args.candidate)}",
+                 "baseline_name": f"{args.baseline} sha256={model_version(args.baseline)}"}
     if args.workers > 1:
         from .evaluate import evaluate_parallel
         print(json.dumps(evaluate_parallel(
@@ -88,7 +92,7 @@ def cmd_eval(args):
             score_utility=args.score_utility,
             required_candidate_win_prop=args.required_candidate_win_prop,
             seed=args.seed, device=device, inference_batch_size=args.inference_batch_size,
-            inference_wait_ms=args.inference_wait_ms), indent=2))
+            inference_wait_ms=args.inference_wait_ms, **recording), indent=2))
         return
     candidate, saved, _ = load_checkpoint(args.candidate, device)
     baseline, previous, _ = load_checkpoint(args.baseline, device)
@@ -97,7 +101,7 @@ def cmd_eval(args):
     print(json.dumps(evaluate(config, Evaluator(candidate, device), Evaluator(baseline, device), args.games,
                               report, score_utility=args.score_utility,
                               required_candidate_win_prop=args.required_candidate_win_prop,
-                              seed=args.seed), indent=2))
+                              seed=args.seed, **recording), indent=2))
 
 
 def cmd_loop(args):
@@ -109,7 +113,7 @@ def cmd_loop(args):
                  score_utility=args.score_utility, promote_threshold=args.required_candidate_win_prop,
                  selfplay_workers=args.selfplay_workers, eval_workers=args.eval_workers,
                  inference_batch_size=args.inference_batch_size,
-                 inference_wait_ms=args.inference_wait_ms)
+                 inference_wait_ms=args.inference_wait_ms, selfplay_policy=args.selfplay_policy)
 
 
 def cmd_rpc(args):
@@ -151,6 +155,11 @@ def add_inference_options(parser):
                         help="max collection wait for cross-game batches in milliseconds (default: 2)")
 
 
+def add_selfplay_policy_option(parser):
+    parser.add_argument("--selfplay-policy", choices=("katago", "legacy"), default="katago",
+                        help="self-play exploration/target profile; runtime only, default: katago")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="transformer-go")
     sub = parser.add_subparsers(required=True)
@@ -159,6 +168,7 @@ def main():
         p = sub.add_parser(name); p.add_argument("--config", default="configs/tiny.yaml"); p.set_defaults(func=func)
         if name == "selfplay":
             add_inference_options(p)
+            add_selfplay_policy_option(p)
             p.add_argument("--output", default="data/replay"); p.add_argument("--games", type=int, default=1)
             p.add_argument("--seed", type=int); p.add_argument("--checkpoint")
             p.add_argument("--workers", type=int, default=1)
@@ -169,6 +179,7 @@ def main():
         elif name == "train":
             p.add_argument("--data", default="data/replay"); p.add_argument("--output", default="runs/model.pt")
             p.add_argument("--steps", type=int, default=100); p.add_argument("--resume")
+            p.add_argument("--metrics-dir", help="loss log directory (default: OUTPUT_PARENT/training/OUTPUT_STEM)")
         else: p.add_argument("--checkpoint")
     p = sub.add_parser("eval"); p.set_defaults(func=cmd_eval)
     add_inference_options(p)
@@ -178,12 +189,17 @@ def main():
     p.add_argument("--workers", type=int, default=1,
                    help="spawned evaluation workers; 1 keeps strict serial gatekeeper execution")
     p.add_argument("--seed", type=int, help="evaluation seed (default: config seed)")
+    p.add_argument("--sgf-dir", default="runs/evaluation",
+                   help="save counted games in a unique match subdirectory (default: runs/evaluation)")
+    p.add_argument("--temperature", type=float,
+                   help="diagnostic fixed temperature; 0 selects maximum MCTS visits, incompatible with gatekeeper promotion")
     p.add_argument("--required-candidate-win-prop", type=float,
                    help="enable gatekeeper acceptance and early stopping at this match-point fraction; omit to play all games")
     p.add_argument("--score-utility", type=float, default=0.05,
                    help="small score prediction contribution to MCTS utility (default: 0.05)")
     p = sub.add_parser("loop"); p.set_defaults(func=cmd_loop)
     add_inference_options(p)
+    add_selfplay_policy_option(p)
     p.add_argument("--config", default="configs/tiny.yaml"); p.add_argument("--output", default="runs/loop")
     p.add_argument("--iterations", type=int, default=1); p.add_argument("--games", type=int, default=8)
     p.add_argument("--steps", type=int, default=100)

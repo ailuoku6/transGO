@@ -100,6 +100,19 @@ def test_loop_cli_resume_can_change_min_moves_without_changing_checkpoint(tmp_pa
     _, saved, payload = load_checkpoint(directory/"learner.pt", torch.device("cpu"))
     assert payload["step"] == 2 and saved.to_dict() == config.to_dict()
     assert sorted(read_shard(p)[1]["min_moves"] for p in (directory/"replay").glob("*.npz")) == [0, 4]
+    from pathlib import Path
+    from transformer_go.sgf import parse
+    for iteration in (1, 2):
+        saved_record = json.loads((directory / f"iteration-{iteration:04d}.json").read_text())
+        match = saved_record["evaluation"]
+        files = list(Path(match["sgf_dir"]).glob("*.sgf"))
+        assert len(files) == match["played"]
+        assert all(path.is_relative_to(directory / "evaluation") for path in files)
+        for path in files:
+            meta = json.loads(parse(path.read_text())[0]["C"][0])
+            assert saved_record["candidate_sha256"] in meta["candidate"]
+            assert saved_record["baseline_sha256"] in meta["baseline"]
+            assert meta["play_settings"]["temperature_override"] is None
     assert '"min_moves": 4' in capsys.readouterr().out
 
 

@@ -7,6 +7,8 @@ from .search import Evaluator
 from .checkpoint import save_checkpoint, load_checkpoint, model_version
 from .selfplay import generate, validate_min_moves
 from .train import train
+from .training_metrics import append_loss_history
+from .exploration import validate_profile, exploration_settings
 from .evaluate import evaluate, evaluate_parallel
 from .inference import validate_batching
 from .gating import (DEFAULT_GATING_GAMES, DEFAULT_REQUIRED_WIN_PROP, GATEKEEPER_PROTOCOL,
@@ -36,12 +38,13 @@ def should_promote(result, threshold=DEFAULT_REQUIRED_WIN_PROP):
 def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, train_steps=100,
                  eval_games=DEFAULT_GATING_GAMES, promote_threshold=DEFAULT_REQUIRED_WIN_PROP, report=print, min_moves=0,
                  score_utility=0.0, selfplay_workers=1, eval_workers=1,
-                 inference_batch_size=256, inference_wait_ms=2.0):
+                 inference_batch_size=256, inference_wait_ms=2.0, selfplay_policy="katago"):
     if iterations < 1:
         raise ValueError("invalid iteration count")
     validate_gating_options(eval_games, promote_threshold)
     validate_min_moves(config.board_size, min_moves)
     validate_batching(inference_batch_size, inference_wait_ms)
+    validate_profile(selfplay_policy)
     if not isinstance(selfplay_workers, int) or isinstance(selfplay_workers, bool) or selfplay_workers < 1:
         raise ValueError("selfplay_workers must be a positive integer")
     if not isinstance(eval_workers, int) or isinstance(eval_workers, bool) or eval_workers < 1:
@@ -68,21 +71,26 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
                               min_moves=min_moves, score_utility=score_utility,
                               report=report, device=device,
                               inference_batch_size=inference_batch_size,
-                              inference_wait_ms=inference_wait_ms)
+                              inference_wait_ms=inference_wait_ms, selfplay_policy=selfplay_policy)
         else:
             generate(config, Evaluator(model, device), root/"replay", selfplay_games,
                      config.seed+index*100000, model_version(best_path), report,
-                     min_moves=min_moves, score_utility=score_utility)
+                     min_moves=min_moves, score_utility=score_utility, selfplay_policy=selfplay_policy)
         candidate = root/f"candidate-{index:04d}.pt"
         # Learner keeps improving even when a candidate fails to replace the actor model.
         model, learner_config, payload = load_checkpoint(learner_path, device, selfplay_only=True)
         if learner_config.to_dict() != config.to_dict(): raise ValueError("learner configuration mismatch")
-        train(config, model, device, root/"replay", candidate, train_steps, payload, report)
+        training = train(config, model, device, root/"replay", candidate, train_steps, payload, report,
+                         metrics_dir=root / "training" / f"iteration-{index:04d}", iteration=index)
+        append_loss_history(root / "training-loss.csv", training["summary"])
         atomic_copy(candidate, learner_path)
         baseline_sha256 = model_version(best_path)
         # A reproducible new match distribution for each iteration, including
         # when resuming an existing run. Keep Config/checkpoint schema unchanged.
         eval_seed = config.seed + index * 100000 + 50000
+        eval_recording = {"sgf_dir": root / "evaluation" / f"iteration-{index:04d}",
+                          "candidate_name": f"{candidate.name} sha256={model_version(candidate)}",
+                          "baseline_name": f"best.pt sha256={baseline_sha256}"}
         if eval_workers > 1:
             # Release the training model before the central service loads
             # one candidate and one baseline for all CPU search workers.
@@ -92,15 +100,18 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
                 score_utility=score_utility,
                 required_candidate_win_prop=promote_threshold, seed=eval_seed,
                 device=device, inference_batch_size=inference_batch_size,
-                inference_wait_ms=inference_wait_ms)
+                inference_wait_ms=inference_wait_ms, **eval_recording)
         else:
             baseline, _, _ = load_checkpoint(best_path, device)
             result = evaluate(config, Evaluator(model, device), Evaluator(baseline, device),
                               eval_games, report, score_utility=score_utility,
-                              required_candidate_win_prop=promote_threshold, seed=eval_seed)
+                              required_candidate_win_prop=promote_threshold, seed=eval_seed,
+                              **eval_recording)
         promoted = should_promote(result, promote_threshold)
         if promoted: atomic_copy(candidate, best_path)
         record = {"iteration": index, "candidate": str(candidate), "promoted": promoted,
+                  "training": training["summary"],
+                  "selfplay_policy": selfplay_policy, "exploration": exploration_settings(config, selfplay_policy),
                   "best_sha256": model_version(best_path), "evaluation": result, "min_moves": min_moves,
                   "score_utility": score_utility, "promotion_policy": GATEKEEPER_PROTOCOL,
                   "required_candidate_win_prop": promote_threshold, "eval_seed": eval_seed,
