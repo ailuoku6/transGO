@@ -9,3 +9,10 @@
 - 注意力局部 mask 仍用 dense kernel；棋盘与超级劫历史仍完整复制，不能当作最终高性能实现。
 
 2026-10-15：trainer 只接受 source=selfplay；自博弈/恢复训练检查 checkpoint 的 random_init_selfplay 来源。SGF 转换到训练入口已删除。Metal 和辅助目标仍保留，标签仅来自自博弈终局。
+
+## 2026-10-20 架构修正
+
+- 规则实际已为 vendored KataGo Board/BoardHistory，早期“中国面积规则 v1”的描述已过时。
+- 并行自博弈/评测改为 spawn CPU 搜索进程 + 父进程单推理线程；每个模型仅一份网络。传输 NumPy 特征/合法 mask，按 model key 和几何分组，有限等待与 batch 上限。
+- C++ Search 持久树按实战 action 提升 child；初始局面来源标识 + 完整着法历史验证同一状态，避免仅用石子 hash。模型对象、min_moves、score utility 变化时清树，回调异常清理虚拟访问。
+- 每模型每局独立 SearchSession；评测两树都随每手推进。根噪声从原始 priors 重新混合。

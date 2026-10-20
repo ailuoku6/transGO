@@ -1,7 +1,7 @@
 from pathlib import Path
 import numpy as np
 from ._native import Board
-from .search import search, choose_action
+from .search import search, choose_action, SearchSession
 from .data import write_shard
 from .sgf import dumps
 
@@ -20,11 +20,12 @@ def play_game(config, evaluator, seed, model_version="untrained", max_moves=None
     rng = np.random.default_rng(seed)
     board = Board(config.board_size, config.komi, config.rules)
     records, actions = [], []
+    session = SearchSession()
     max_moves = 4*board.size*board.size+100 if max_moves is None else max_moves
     early_forced_passes = 0
     for t in range(max_moves):
         result = search(board, evaluator, config.search, int(rng.integers(2**31)), noise=True,
-                        min_moves=min_moves, score_utility=score_utility)
+                        min_moves=min_moves, score_utility=score_utility, session=session)
         temperature = 1.0 if t < config.search.temperature_moves else 0.1
         action = choose_action(result["policy"], temperature, rng)
         if action == board.size*board.size and t < min_moves:
@@ -32,6 +33,7 @@ def play_game(config, evaluator, seed, model_version="untrained", max_moves=None
         records.append((board.features(), board.legal_mask(), result["policy"], board.to_play))
         actions.append(action)
         board = board.play(action)
+        session.advance(action)
         if board.terminal():
             break
     if not board.terminal() or board.no_result():
@@ -56,6 +58,7 @@ def play_game(config, evaluator, seed, model_version="untrained", max_moves=None
             "dead_stones": int(np.asarray(formal["dead_stones"], dtype=np.int8).sum()),
             "adjudication_engine": formal["adjudication_engine"],
             "score_utility": score_utility,
+            "tree_reuse": True, "search_budget": "retained-plus-new-edge-visits",
             "early_forced_passes": early_forced_passes}
     return data, meta, dumps(n, config.komi, actions, score, config.rules)
 

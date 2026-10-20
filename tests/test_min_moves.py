@@ -103,7 +103,7 @@ def test_loop_cli_resume_can_change_min_moves_without_changing_checkpoint(tmp_pa
     assert '"min_moves": 4' in capsys.readouterr().out
 
 
-def test_parallel_selfplay_cli_propagates_min_moves(tmp_path, monkeypatch):
+def test_parallel_selfplay_cli_propagates_min_moves(tmp_path, monkeypatch, capsys):
     config = load_config("configs/smoke.yaml")
     config.device = "cpu"
     config_path = tmp_path/"config.yaml"
@@ -111,11 +111,17 @@ def test_parallel_selfplay_cli_propagates_min_moves(tmp_path, monkeypatch):
     replay = tmp_path/"replay"
     monkeypatch.setattr(sys, "argv", ["transformer-go", "selfplay", "--config", str(config_path),
                                      "--output", str(replay), "--games", "2", "--workers", "2",
-                                     "--min-moves", "4"])
+                                     "--min-moves", "4", "--inference-batch-size", "8",
+                                     "--inference-wait-ms", "0.5"])
     main()
     paths = list(replay.glob("*.npz"))
     assert len(paths) == 2
     for path in paths:
         data, meta = read_shard(path)
         assert meta["min_moves"] == 4 and meta["moves"] >= 6
+        assert meta["tree_reuse"]
         assert not data["policy"][:4, -1].any()
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    summary = next(event for event in events if event["event"] == "inference_summary")
+    assert summary["max_batch_size"] == 8 and summary["max_wait_ms"] == .5
+    assert summary["models"]["selfplay"]["positions"] > 0

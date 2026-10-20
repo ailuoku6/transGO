@@ -1,23 +1,13 @@
-# 接续
+# 接续（2026-10-20）
 
-从 `index.md`、`README.md`、`IMPLEMENTATION.md` 开始。用户已授权按方案编码，指定 Python/PyTorch + C++ + Metal。
+用户授权的“跨局面集中批量推理 + MCTS 子树复用”已实现，代码尚未提交。先看 README.md、IMPLEMENTATION.md、changes.md 的最新记录，早期 CPU 测试数量/规则实现描述已过时。
 
-最新功能：`loop`、`selfplay`（含多 actor）支持 `--min-moves N`。阈值前 C++ PUCT 屏蔽 pass，棋盘没有合法非 pass 时仍可 pass；评测不受约束。参数不进入 checkpoint config，可在同一目录续跑时修改，值会写入 replay metadata/迭代 JSON。专项测试为 `tests/test_min_moves.py`，最近 12 passed。
+- 规则使用 vendored KataGo Board/BoardHistory，模型为 PyTorch；训练仅随机初始化和自身对局。
+- 多 worker 是 spawn CPU 搜索进程，父进程集中推理线程每个模型只加载一次；按 model key/几何合批。selfplay 用一个模型，evaluation 的 candidate/baseline 分开批次和两棵树，每手两树都 advance。
+- C++ Search 的 reuse=True 持久树按完整着法来源校验。目标预算包含保留的子边访问，返回 new_simulations/reused_simulations；根噪声每次从 base priors 重建。失败回调清树。
+- selfplay/evaluate 自动复用；Search.run 默认 fresh，Python search 不传 session 也是 fresh。权重若原地变化，调用方必须 reset 会话。
+- --inference-batch-size 默认 256、--inference-wait-ms 默认 2，只用于多 worker，不改 Config/checkpoint；旧 checkpoint 可继续训练。推理统计见 selfplay inference_summary、evaluation inference。
+- 已重新编译 native，全套 109 passed、5 skipped；MPS 在当前沙箱 unavailable。真实并行 CLI 自博弈 2 局→训练 1 step→评测 2 局通过，config 一致。未改现有 runs/zero-9x9。
+- 基准 `.venv/bin/python -m benchmarks.search_optimizations`：CPU smoke 5x5/8手/64模拟，树复用 NN 518→489；4 worker 集中调用 548→138，平均 batch 3.79→15.04，但搜索 0.281→0.442 s。不要将减少调用次数等同已证实 GPU 提速。
 
-另有运行时 `--score-utility`（CLI 默认 0.05）：把已有 `score_mean` 以 `weight*tanh(score)` 加入 PUCT 叶价值；不改模型/checkpoint 配置，现有 9x9 run 可直接续训。设为 0 可关闭。
-
-`transformer_go/judgment.py` 已加入正式裁定/形势预测分离：`adjudicate` 只取 native 终局结果，`position_report` 暴露 WDL、score mean/std、ownership、likely-dead、moves-left。RPC `analyze` 返回模型报告，终局 `state` 返回 adjudication。当前仍是中国面积规则 v1，尚未实现 KataGo 全部规则、自动死子协商和完整 score/ownership 搜索 utility。
-
-现有 v0.1 可以从 C++ 规则、批量 PUCT 一直跑到自博弈、训练、评测和晋级。Metal 可真实运行，但工具沙箱可能隐藏 GPU；环境外 `doctor` 返回 mps。不要仅凭沙箱检测认定 Mac 没有 Metal。
-
-运行 `.venv/bin/python -m pytest -q`；改 native 后 `.venv/bin/python setup.py build_ext --inplace`。真实 Metal 项 `.venv/bin/python -m pytest -q tests/test_mps.py`。当前 CPU 24 passed，Metal 4 passed。
-
-`configs/smoke.yaml` 是 3x3，仅验证工程。`tiny.yaml` 是 9x9 约482万参数，200模拟。`runs/closed-loop-v2` 有两轮演示结果，`runs/metal/model.pt` 是微量训练工件，没有棋力保证。
-
-后续优先随机网络自博弈冷启动与固定预算评测，再 profiling 优化气数、状态复制、树复用、中心推理。SPRT、优先回放、DDP、HTTP、完整多规则未实现。不要把研究方案描述为全部完工。
-
-- 最终统一验证：在可访问 Metal 的环境运行 `.venv/bin/python -m pytest -q`，28 passed（2.75 秒），包含全部 CPU 与 Metal 用例。
-
-用户最新约束：不使用人类棋谱，随机初始化，仅自身 MCTS 对局训练。新 checkpoint 记录 training_origin=random_init_selfplay，旧无标记工件不可续入 Zero 训练；新目录启动，不删除旧工件。SGF 仅导出与查看。
-
-- 2026-10-15 纯自博弈更新最终验证：完整 CPU+Metal 测试 34 passed（2.78 秒）；新的 runs/zero-only-smoke 在 MPS 上完成 2 局、39 个训练局面、3 步训练和 2 局候选评测。无长期棋力结论。
+后续：目标设备运行基准，使用 `--config configs/tiny.yaml --device mps --board-size 9 --simulations 200 --workers 4`，调 batch/等待/worker。全套测试 `.venv/bin/python -m pytest -q`；native 改动后 `.venv/bin/python setup.py build_ext --inplace`。没有长期棋力结论。

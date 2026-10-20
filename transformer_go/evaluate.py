@@ -6,8 +6,9 @@ from ._native import Board
 from .config import from_dict
 from .checkpoint import load_checkpoint
 from .runtime import select_device
-from .search import search, choose_action
+from .search import search, choose_action, SearchSession
 from .search import Evaluator
+from .inference import InferenceServer, worker_evaluators, validate_batching
 from .gating import (DEFAULT_GATING_GAMES, GATEKEEPER_PROTOCOL,
                      gatekeeper_decision, validate_gating_options)
 
@@ -35,13 +36,17 @@ def _play_evaluation_game(config, candidate, baseline, candidate_color, seed,
                           score_utility, max_moves):
     board = Board(config.board_size, config.komi, config.rules)
     rng = np.random.default_rng(seed)
+    candidate_tree, baseline_tree = SearchSession(), SearchSession()
     for _ in range(max_moves):
         evaluator = candidate if board.to_play == candidate_color else baseline
+        session = candidate_tree if board.to_play == candidate_color else baseline_tree
         result = search(board, evaluator, config.search, seed=int(rng.integers(2**31)),
-                        noise=False, min_moves=0, score_utility=score_utility)
+                        noise=False, min_moves=0, score_utility=score_utility, session=session)
         action = choose_action(result["visits"],
                                gatekeeper_temperature(board.move_number, board.size), rng)
         board = board.play(action)
+        candidate_tree.advance(action)
+        baseline_tree.advance(action)
         if board.terminal():
             break
     forced_scored = not board.terminal()
@@ -53,9 +58,8 @@ def _play_evaluation_game(config, candidate, baseline, candidate_color, seed,
     return {"outcome": outcome, "forced_scored": forced_scored, "moves": board.move_number}
 
 
-def _init_evaluation_worker(raw, candidate_path, baseline_path, requested_device=None):
-    """Load both networks once in each spawned evaluation worker."""
-    global _EVAL_STATE
+def _load_evaluation_models(raw, candidate_path, baseline_path, requested_device=None):
+    """Load and validate both networks once in the parent process."""
     config = from_dict(raw)
     requested = config.device if requested_device is None else str(requested_device)
     device = select_device(requested)
@@ -73,7 +77,13 @@ def _init_evaluation_worker(raw, candidate_path, baseline_path, requested_device
     if (candidate_raw["model"] != requested_raw["model"] or
             candidate_raw["board_size"] != requested_raw["board_size"]):
         raise ValueError("evaluation checkpoint configuration differs from requested config")
-    _EVAL_STATE = (config, Evaluator(candidate, device), Evaluator(baseline, device))
+    return {"candidate": Evaluator(candidate, device), "baseline": Evaluator(baseline, device)}
+
+
+def _init_evaluation_worker(raw, channels):
+    global _EVAL_STATE
+    candidate, baseline = worker_evaluators(channels, ("candidate", "baseline"))
+    _EVAL_STATE = (from_dict(raw), candidate, baseline)
 
 
 def _evaluation_game_task(candidate_color, seed, score_utility, max_moves):
@@ -113,7 +123,8 @@ def _play_settings(config, max_moves):
     return {"board_size": config.board_size, "komi": config.komi, "rules": config.rules,
             "max_moves": max_moves, "opening": "empty", "temperature_early": 0.5,
             "temperature_late": 0.2, "temperature_halflife_19x19": 19,
-            "root_noise": False}
+            "root_noise": False, "tree_reuse": True,
+            "search_budget": "retained-plus-new-edge-visits"}
 
 
 def _finish_evaluation(config, games, seed, required_candidate_win_prop, score_utility,
@@ -200,7 +211,7 @@ def evaluate(config, candidate, baseline, games=DEFAULT_GATING_GAMES, report=pri
 def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATING_GAMES,
                       workers=2, report=print, score_utility=0.0, *,
                       required_candidate_win_prop=None, seed=None, max_moves=1600,
-                      device=None):
+                      device=None, inference_batch_size=256, inference_wait_ms=2.0):
     """Evaluate in spawned processes while aggregating in deterministic order.
 
     At most ``workers`` games are in flight at once.  A gatekeeper decision is
@@ -210,6 +221,7 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
     """
     if not isinstance(workers, int) or isinstance(workers, bool) or workers < 2:
         raise ValueError("parallel evaluation requires workers >= 2")
+    validate_batching(inference_batch_size, inference_wait_ms)
     seed = _validate_evaluation_args(config, games, score_utility,
                                      required_candidate_win_prop, seed, max_moves)
     schedule = _evaluation_schedule(games, seed)
@@ -219,6 +231,9 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
     settings = _play_settings(config, max_moves)
     settings["workers"] = worker_count
     settings["scheduler"] = "spawn-process-batches"
+    settings["inference"] = "central-batched"
+    settings["inference_batch_size"] = inference_batch_size
+    settings["inference_wait_ms"] = inference_wait_ms
     report({"event": "evaluation_start", "games": games, "seed": seed,
             "protocol": GATEKEEPER_PROTOCOL if gating else "full-match-v2",
             "required_candidate_win_prop": required_candidate_win_prop,
@@ -229,12 +244,14 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
     stop_reason = "max_games"
     played = 0
     points = 0.0
-    with ProcessPoolExecutor(
+    evaluators = _load_evaluation_models(config.to_dict(), candidate_path, baseline_path, device)
+    context = multiprocessing.get_context("spawn")
+    with InferenceServer(evaluators, worker_count, context,
+                         inference_batch_size, inference_wait_ms) as server, ProcessPoolExecutor(
         max_workers=worker_count,
-        mp_context=multiprocessing.get_context("spawn"),
+        mp_context=context,
         initializer=_init_evaluation_worker,
-        initargs=(config.to_dict(), str(candidate_path), str(baseline_path),
-                  None if device is None else str(device)),
+        initargs=(config.to_dict(), server.channels),
     ) as pool:
         for start in range(0, games, worker_count):
             batch = schedule[start:start + worker_count]
@@ -286,6 +303,7 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
             "candidate_points": points, "baseline_points": played - points,
             "winrate": rate, "confidence95": interval, "elo_difference": elo,
             "seed": seed, "play_settings": settings,
+            "inference": server.stats(),
             "early_stopped": played < games, "stop_reason": stop_reason,
             "gating": {"protocol": GATEKEEPER_PROTOCOL,
                        "required_candidate_win_prop": required_candidate_win_prop,

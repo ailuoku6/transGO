@@ -81,7 +81,7 @@ transformer-go doctor
   --output data/replay --games 8 --workers 2 --min-moves 40
 ```
 
-使用 spawn 多进程，actor 各自持有一份模型和 C++ 搜索树；同一个 worker 会复用模型完成多盘棋，不会每盘重新加载 checkpoint。并发数默认 1。Metal 共享系统内存，先从 2 个 actor 开始测量。第一版还没有集中式 GPU 推理服务，增加 actor 不一定带来同比加速。checkpoint 提供完整的自博弈模型及搜索配置；传入 `--checkpoint` 时使用 checkpoint 保存的模型，`--config` 的 device 字段决定本次运行设备。父进程会转发每盘 `game_completed` 事件，最后输出 `parallel_selfplay_complete`。
+使用 spawn CPU 搜索进程，父进程只加载一份网络并集中合批推理，树和 Go 规则状态仍留在各 worker。同一局里选中着法的子树会升为下一手根节点；保留访问计入该手预算，只补足到 `search.simulations`。不同局面请求按模型和棋盘尺寸合批。并发数默认 1；多进程时可用 `--inference-batch-size` 限制单次推理上限（默认 256 局面），`--inference-wait-ms` 控制合批等待（默认 2 ms）。父进程转发每盘 `game_completed`，并报告推理批次统计和 `inference_summary`。MPS 共享内存的设备适用性、batch 等待和 worker 数需用目标硬件测量。
 
 完整 `loop` 也支持把自博弈和评估分别放入多进程池：
 
@@ -92,7 +92,9 @@ transformer-go doctor
   --min-moves 70 --selfplay-workers 2 --eval-workers 2
 ```
 
-`--selfplay-workers` 控制每轮自博弈 actor 数，`--eval-workers` 控制 candidate/best 评估 worker 数；两者默认都是 `1`，所以旧命令仍按串行方式运行。评估 worker 各自加载 candidate 和 baseline，父进程预先生成黑白轮换与随机种子，并按该顺序汇总结果，因此 match points、晋级和 JSON 记录不受 worker 完成顺序影响。评估按小批次启动任务；如果 gatekeeper 已经确定晋级或淘汰，当前批次已经启动的棋局可能完成但会被丢弃，不计入 `played`，进程池会等待这些已运行任务退出。
+`--selfplay-workers` 控制 CPU 搜索进程数，`--eval-workers` 控制并行评测局数；两者默认都是 `1`，旧命令保持串行兼容。并行模式下父进程分别持有 self-play 网络，或 candidate 与 baseline 两个独立网络；子进程提交 CPU 特征和合法 mask，不加载 GPU 模型。请求按模型分别合批，评测局每走一步都会同时推进两棵搜索树；candidate 的访问统计不会混入 baseline。父进程预先生成黑白轮换与随机种子，并按该顺序汇总 match points，晋级结果不受完成顺序影响。gatekeeper 已经确定结果时，当前批次已运行棋局仍会完成并丢弃，不计入 `played`；推理服务会一直等到 worker 退出。
+
+`--inference-batch-size` 和 `--inference-wait-ms` 是并行模式的运行时参数，不写入 checkpoint 配置。`evaluate_parallel` 会在结果中记录每个模型的 forward 数、位置数、最大/平均 batch 和跨 worker 合批次数。树只在同一局、同一模型与完整合法历史匹配时复用；变更 `min_moves`、score utility 或评估器会使旧树失效。若旧树已有的访问超过新预算，保留访问会原样返回，不会为了凑预算丢弃搜索统计。
 
 也可以单独并行评估两个 checkpoint：
 
@@ -103,7 +105,7 @@ transformer-go doctor
   --required-candidate-win-prop 0.5
 ```
 
-多进程会为每个 worker 保留独立的 Transformer 模型。MPS/Metal 下先使用 `2`，观察内存和吞吐后再增加；多个进程争抢同一 GPU 时可能比 `1` 更慢。训练器本身仍在父进程中单进程使用 MPS，避免多个 optimizer 同时更新同一 checkpoint。
+集中合批只在多个 worker 时启用；单 worker 直接调用模型，也会自动复用子树。MPS/Metal 可先从 2～4 个 worker 测量，评估中每个模型要有多个请求同时就绪才能合批。`search.batch_size` 仍控制单树叶子批量，`--inference-batch-size` 是跨局面上限，增大上限本身不保证满批。checkpoint 提供完整的自博弈模型及搜索配置，`--config` 的 device 字段决定本次运行设备。训练器继续在父进程中单进程运行。
 
 ## 从零开始的训练路线
 
@@ -178,6 +180,8 @@ GTP 2 标准输入/输出接口：
 ```
 
 benchmark 包含一次预热并同步 GPU，报告该配置下的搜索速度、推理调用数和参数量。小棋盘、小 batch 的 Metal 调度成本可能高于 CPU；需要在 9x9/19x19 和实际 batch 下测量，不能用 smoke 数值推断正式吞吐。
+
+搜索复用与集中推理可用 `.venv/bin/python -m benchmarks.search_optimizations --config configs/tiny.yaml --device mps --board-size 9 --simulations 200 --workers 4` 做对照；结果含树复用前后的访问/推理量、单机并行的启动与搜索时间、平均推理 batch 和跨进程合批数。当前工具沙箱若报告 MPS 不可用，可使用 `--device cpu` 验证功能，但不能从 CPU 小盘吞吐推断 GPU 加速。CPU smoke 网络（5x5、8 手、每手 64 模拟、4 worker）只观察到调用 548→138、平均 batch 3.8→15.0，搜索阶段 0.281→0.442 秒；它证明请求确实合并，且说明低负载 CPU 下 IPC/同步成本能抵消合批收益。
 
 ## 数据、视角与规则约定
 

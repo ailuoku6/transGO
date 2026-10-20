@@ -16,3 +16,12 @@
 - RPC `analyze` 返回网络形势报告（WDL、winrate、score mean/std、moves-left、ownership、likely-dead），`state` 在终局返回规则裁定报告；网络预测不会覆盖正式规则结果。
 
 2026-10-15：checkpoint schema v1 新增 training_origin=random_init_selfplay；缺失/非该值的工件在自博弈与续训时拒绝，在 GTP/分析可读。replay 仅采样 source=selfplay，否则 fail fast。来源是工程追踪记录，不是外部文件认证。
+
+## 2026-10-20 搜索/推理协议
+
+- Search.run 默认仍为新树；reuse=True 配合 advance(action)/reset() 使用持久树。Python search 的 session 参数可选，自博弈和评测自动使用。
+- simulations 表示输出根子边访问总数；new_simulations + reused_simulations = simulations。提升节点自身首次网络评估不计入子边预算；已有访问超过新预算时原样保留。
+- --inference-batch-size 默认 256、--inference-wait-ms 默认 2；只控制多 worker 的集中推理，不加入 Config/checkpoint。search.batch_size 仍为单树批量。
+- 请求/响应含 client、model key、请求序号，按原行序回填；模型失败传播给等待客户端。推理服务生命周期包住进程池，gatekeeper 丢弃局也能完成和退出。
+- 自博弈 inference_summary、评测结果 inference 按模型报告 requests/calls/positions/max_batch_size/mean_batch_size/cross_client_batches。评测统计含已启动但未计分的对局工作量。
+- replay metadata 与 iteration JSON 添加 tree_reuse，replay/play_settings 的 search_budget 为 retained-plus-new-edge-visits。无已有权重/replay 迁移。

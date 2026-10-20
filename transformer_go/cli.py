@@ -9,6 +9,7 @@ from .checkpoint import load_checkpoint, model_version
 from .train import train
 from ._native import Board
 from .gating import DEFAULT_GATING_GAMES, DEFAULT_REQUIRED_WIN_PROP
+from .inference import validate_batching
 
 
 def report(record):
@@ -24,12 +25,15 @@ def cmd_selfplay(args):
     seed_all(config.seed)
     if args.workers < 1:
         raise ValueError("workers must be a positive integer")
+    validate_batching(args.inference_batch_size, args.inference_wait_ms)
     device = select_device(config.device)
     if args.workers > 1:
         from .actors import generate_parallel
         paths = generate_parallel(config, args.checkpoint, args.output, args.games, args.workers,
                                   args.seed, min_moves=args.min_moves, score_utility=args.score_utility,
-                                  report=report, device=device)
+                                  report=report, device=device,
+                                  inference_batch_size=args.inference_batch_size,
+                                  inference_wait_ms=args.inference_wait_ms)
         report({"event": "parallel_selfplay_complete", "paths": paths})
         return
     model = PolicyValueNet(config.model).to(device)
@@ -75,6 +79,7 @@ def cmd_eval(args):
     config = load_config(args.config)
     if args.workers < 1:
         raise ValueError("workers must be a positive integer")
+    validate_batching(args.inference_batch_size, args.inference_wait_ms)
     device = select_device(config.device)
     if args.workers > 1:
         from .evaluate import evaluate_parallel
@@ -82,7 +87,8 @@ def cmd_eval(args):
             config, args.candidate, args.baseline, args.games, args.workers, report,
             score_utility=args.score_utility,
             required_candidate_win_prop=args.required_candidate_win_prop,
-            seed=args.seed, device=device), indent=2))
+            seed=args.seed, device=device, inference_batch_size=args.inference_batch_size,
+            inference_wait_ms=args.inference_wait_ms), indent=2))
         return
     candidate, saved, _ = load_checkpoint(args.candidate, device)
     baseline, previous, _ = load_checkpoint(args.baseline, device)
@@ -101,7 +107,9 @@ def cmd_loop(args):
     run_pipeline(config, select_device(config.device), args.output, args.iterations,
                  args.games, args.steps, args.eval_games, report=report, min_moves=args.min_moves,
                  score_utility=args.score_utility, promote_threshold=args.required_candidate_win_prop,
-                 selfplay_workers=args.selfplay_workers, eval_workers=args.eval_workers)
+                 selfplay_workers=args.selfplay_workers, eval_workers=args.eval_workers,
+                 inference_batch_size=args.inference_batch_size,
+                 inference_wait_ms=args.inference_wait_ms)
 
 
 def cmd_rpc(args):
@@ -136,6 +144,13 @@ def cmd_benchmark(args):
                       "evaluator_calls": evaluator.calls-1, "parameters": sum(p.numel() for p in model.parameters())}, indent=2))
 
 
+def add_inference_options(parser):
+    parser.add_argument("--inference-batch-size", type=int, default=256,
+                        help="max positions per centralized forward with multiple workers (default: 256)")
+    parser.add_argument("--inference-wait-ms", type=float, default=2.0,
+                        help="max collection wait for cross-game batches in milliseconds (default: 2)")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="transformer-go")
     sub = parser.add_subparsers(required=True)
@@ -143,6 +158,7 @@ def main():
     for name, func in (("selfplay", cmd_selfplay), ("train", cmd_train), ("gtp", cmd_gtp), ("json-rpc", cmd_rpc)):
         p = sub.add_parser(name); p.add_argument("--config", default="configs/tiny.yaml"); p.set_defaults(func=func)
         if name == "selfplay":
+            add_inference_options(p)
             p.add_argument("--output", default="data/replay"); p.add_argument("--games", type=int, default=1)
             p.add_argument("--seed", type=int); p.add_argument("--checkpoint")
             p.add_argument("--workers", type=int, default=1)
@@ -155,6 +171,7 @@ def main():
             p.add_argument("--steps", type=int, default=100); p.add_argument("--resume")
         else: p.add_argument("--checkpoint")
     p = sub.add_parser("eval"); p.set_defaults(func=cmd_eval)
+    add_inference_options(p)
     p.add_argument("--config", default="configs/tiny.yaml")
     p.add_argument("--candidate", required=True); p.add_argument("--baseline", required=True)
     p.add_argument("--games", type=int, default=DEFAULT_GATING_GAMES)
@@ -166,6 +183,7 @@ def main():
     p.add_argument("--score-utility", type=float, default=0.05,
                    help="small score prediction contribution to MCTS utility (default: 0.05)")
     p = sub.add_parser("loop"); p.set_defaults(func=cmd_loop)
+    add_inference_options(p)
     p.add_argument("--config", default="configs/tiny.yaml"); p.add_argument("--output", default="runs/loop")
     p.add_argument("--iterations", type=int, default=1); p.add_argument("--games", type=int, default=8)
     p.add_argument("--steps", type=int, default=100)

@@ -37,6 +37,9 @@ private:
     ::Board kboard;
     ::BoardHistory khist;
     std::vector<std::vector<int>> history;
+    // Copies and play() preserve provenance. Independently constructed boards
+    // must never reuse estimates based only on an equal stone-position hash.
+    std::shared_ptr<int> lineage = std::make_shared<int>(0);
 
     static ::Board make_kata_board(int n) {
         if (n < 2 || n > ::Board::MAX_LEN)
@@ -227,6 +230,17 @@ public:
 
     uint64_t hash() const { return kboard.pos_hash.hash0 ^ kboard.pos_hash.hash1; }
 
+    bool same_state(const GoBoard& other) const {
+        if(lineage != other.lineage || khist.moveHistory.size() != other.khist.moveHistory.size())
+            return false;
+        for(size_t i=0;i<khist.moveHistory.size();++i) {
+            const auto& a=khist.moveHistory[i];
+            const auto& b=other.khist.moveHistory[i];
+            if(a.loc!=b.loc || a.pla!=b.pla) return false;
+        }
+        return true;
+    }
+
     py::dict formal_result() const {
         py::dict out;
         out["score_black"] = score();
@@ -300,7 +314,7 @@ struct Node {
     int visits=0, virtual_visits=0;
     double value_sum=0;
     bool expanded=false, pending=false;
-    std::vector<double> priors;
+    std::vector<double> priors, base_priors;
     std::vector<int> legal;
     std::vector<std::unique_ptr<Node>> children;
     explicit Node(const GoBoard& b, int min_moves=0):board(b),priors(b.size*b.size+1,0),legal(b.legal_mask()),children(b.size*b.size+1) {
@@ -314,6 +328,10 @@ struct Node {
 class Search {
     double c_puct, virtual_loss;
     std::mt19937 rng;
+    std::unique_ptr<Node> tree;
+    py::object tree_evaluator;
+    int tree_min_moves=0;
+    double tree_score_utility=0;
     using Path=std::vector<Node*>;
     void backup(const Path& path,double value) {
         for(auto it=path.rbegin();it!=path.rend();++it) {
@@ -331,6 +349,7 @@ class Search {
             sum=std::accumulate(n->priors.begin(),n->priors.end(),0.0);
         }
         for(double& p0:n->priors) p0/=sum;
+        n->base_priors=n->priors;
         n->expanded=true;
     }
     Path select(Node& root, int min_moves) {
@@ -359,12 +378,39 @@ public:
     Search(double cp=1.5,double vl=1.0,unsigned seed=0):c_puct(cp),virtual_loss(vl),rng(seed) {
         if(!std::isfinite(cp) || !std::isfinite(vl) || cp<=0 || vl<0) throw std::invalid_argument("invalid search parameters");
     }
+    void reset() { tree.reset(); tree_evaluator=py::object(); }
+    void reseed(unsigned seed) { rng.seed(seed); }
+    bool advance(int action) {
+        if(!tree || action<0 || action>=static_cast<int>(tree->children.size()) || !tree->children[action]) {
+            reset(); return false;
+        }
+        auto next=std::move(tree->children[action]);
+        tree=std::move(next);
+        return true;
+    }
     py::dict run(const GoBoard& board,py::function evaluator,int simulations=200,int batch_size=16,
-                 double alpha=0.15,double epsilon=0.0,int min_moves=0,double score_utility=0.0) {
+                 double alpha=0.15,double epsilon=0.0,int min_moves=0,double score_utility=0.0,bool reuse=false) {
+        try {
+            return run_impl(board,evaluator,simulations,batch_size,alpha,epsilon,min_moves,score_utility,reuse);
+        } catch(...) {
+            // Failed callbacks may leave reservations or partially backed-up
+            // batches. Discard all of them before the next request.
+            reset(); throw;
+        }
+    }
+private:
+    py::dict run_impl(const GoBoard& board,py::function evaluator,int simulations,int batch_size,
+                     double alpha,double epsilon,int min_moves,double score_utility,bool reuse) {
         if(board.terminal() || simulations<1 || batch_size<1 || min_moves<0 || !std::isfinite(alpha) || !std::isfinite(epsilon) ||
            !std::isfinite(score_utility) || alpha<=0 || epsilon<0 || epsilon>1 || score_utility<0)
             throw std::invalid_argument("invalid search request");
-        Node root(board,min_moves);
+        if(!reuse || !tree || !tree->board.same_state(board) ||
+           !tree_evaluator.is(evaluator) || tree_min_moves!=min_moves || tree_score_utility!=score_utility) {
+            tree=std::make_unique<Node>(board,min_moves);
+            tree_evaluator=evaluator;
+            tree_min_moves=min_moves;tree_score_utility=score_utility;
+        }
+        Node& root=*tree;
         auto evaluate=[&](const std::vector<Path>& paths) {
             py::list boards;
             for(const auto& path:paths) boards.append(py::cast(path.back()->board));
@@ -395,8 +441,11 @@ public:
             }
         };
         // Root expansion is initialization and excluded from the simulation budget.
-        root.virtual_visits++; evaluate({Path{&root}});
-        root.visits=0;root.value_sum=0;
+        if(!root.expanded) {
+            root.virtual_visits++; evaluate({Path{&root}});
+            root.visits=0;root.value_sum=0;
+        }
+        root.priors=root.base_priors;
         if(epsilon>0) {
             std::gamma_distribution<double> gamma(alpha,1.0);
             const auto& mask=root.legal;std::vector<double> noise(mask.size(),0);double total=0;
@@ -404,8 +453,13 @@ public:
             if(total<=0 || !std::isfinite(total)) throw std::invalid_argument("Dirichlet noise underflow: increase alpha");
             for(size_t a=0;a<mask.size();++a) root.priors[a]=(1-epsilon)*root.priors[a]+epsilon*noise[a]/total;
         }
-        int done=0;
+        // A promoted node's own expansion visit is not an outgoing edge
+        // visit. Only retained child visits count toward this move's budget.
+        int reused=0;
+        for(const auto& child:root.children) if(child) reused+=child->visits;
+        int done=reused;
         while(done<simulations) {
+            const int before=done;
             std::vector<Path> paths;
             int target=std::min(batch_size,simulations-done);
             for(int i=0;i<target;++i) {
@@ -419,15 +473,17 @@ public:
                 }
             }
             if(!paths.empty()) {evaluate(paths);done+=static_cast<int>(paths.size());}
-            else if(done<simulations && root.visits!=done) throw std::runtime_error("search stalled");
+            else if(done==before) throw std::runtime_error("search stalled");
         }
         std::vector<int> visits(root.children.size(),0);
         std::vector<double> policy(root.children.size(),0);
         for(size_t a=0;a<visits.size();++a) if(root.children[a]) {
-            visits[a]=root.children[a]->visits;policy[a]=static_cast<double>(visits[a])/simulations;
+            visits[a]=root.children[a]->visits;policy[a]=static_cast<double>(visits[a])/done;
         }
         py::dict result;result["visits"]=visits;result["policy"]=policy;
         result["value"]=root.value_sum/root.visits;result["simulations"]=done;
+        result["reused_simulations"]=reused;result["new_simulations"]=done-reused;
+        if(!reuse) reset();
         return result;
     }
 };
@@ -455,7 +511,8 @@ PYBIND11_MODULE(_native,m) {
         .def("features",&GoBoard::features).def("hash",&GoBoard::hash);
     py::class_<Search>(m,"Search")
         .def(py::init<double,double,unsigned>(),py::arg("c_puct")=1.5,py::arg("virtual_loss")=1.0,py::arg("seed")=0)
+        .def("reset",&Search::reset).def("advance",&Search::advance).def("reseed",&Search::reseed)
         .def("run",&Search::run,py::arg("board"),py::arg("evaluator"),py::arg("simulations")=200,
              py::arg("batch_size")=16,py::arg("alpha")=0.15,py::arg("epsilon")=0.0,
-             py::arg("min_moves")=0,py::arg("score_utility")=0.0);
+             py::arg("min_moves")=0,py::arg("score_utility")=0.0,py::arg("reuse")=false);
 }

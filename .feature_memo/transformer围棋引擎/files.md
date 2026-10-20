@@ -16,3 +16,14 @@
 - `runs/` 与 `.venv/` 均忽略；工作区当前没有 Git 仓库。
 
 2026-10-15 修改：data.py 来源限制；checkpoint.py 来源记录；train/cli/actors/pipeline 检查训练链；sgf.py 移除转换；test_zero_training.py 测试非 selfplay 拒绝与随机初始化闭环；README/TECHNICAL_PLAN/IMPLEMENTATION 改为纯自博弈路线。
+
+## 2026-10-20 修改与状态修正
+
+- 当前目录已有 Git 仓库，旧文档“没有 Git 仓库”已过时；本轮在已有工作区编辑，未提交。
+- cpp/native.cpp：持久 Search 树、完整着法来源校验、预算与噪声处理。
+- transformer_go/inference.py：新增集中推理服务、同步进程客户端、分模型合批、统计与异常处理。
+- transformer_go/search.py、selfplay.py、evaluate.py、actors.py：数组推理、每局会话、CPU worker 接入。
+- transformer_go/cli.py、pipeline.py：运行时合批上限/等待时间透传。
+- tests/test_tree_reuse.py、test_inference.py：树复用与集中推理专项；test_gating.py、test_min_moves.py 扩展兼容/CLI 验证。
+- benchmarks/search_optimizations.py：固定动作序列的树复用/集中推理对照。
+- README.md、IMPLEMENTATION.md：新架构、参数、验证数据与 CPU/GPU 边界。

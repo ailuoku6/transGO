@@ -252,10 +252,13 @@ def test_cli_loop_forwards_process_worker_counts(monkeypatch, tmp_path):
     path.write_text(yaml.safe_dump(config.to_dict()))
     monkeypatch.setattr(sys, "argv", [
         "transformer-go", "loop", "--config", str(path),
-        "--selfplay-workers", "2", "--eval-workers", "3"])
+        "--selfplay-workers", "2", "--eval-workers", "3",
+        "--inference-batch-size", "64", "--inference-wait-ms", "1.5"])
     main()
     assert captured["kwargs"]["selfplay_workers"] == 2
     assert captured["kwargs"]["eval_workers"] == 3
+    assert captured["kwargs"]["inference_batch_size"] == 64
+    assert captured["kwargs"]["inference_wait_ms"] == 1.5
 
 
 def test_parallel_evaluation_batches_and_preserves_gatekeeper_accounting(monkeypatch):
@@ -281,6 +284,7 @@ def test_parallel_evaluation_batches_and_preserves_gatekeeper_accounting(monkeyp
 
     monkeypatch.setattr(evaluation, "ProcessPoolExecutor", ImmediatePool)
     monkeypatch.setattr(evaluation, "_init_evaluation_worker", lambda *args: None)
+    monkeypatch.setattr(evaluation, "_load_evaluation_models", lambda *args: {})
 
     def game(color, seed, score_utility, max_moves):
         return {"outcome": "win", "forced_scored": False, "moves": 2}

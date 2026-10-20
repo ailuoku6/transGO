@@ -1,8 +1,8 @@
 # Transformer 围棋引擎
 
 - 状态：第一版闭环已实现，研究路线继续迭代。
-- 更新：2026-10-17。
-- 当前重点：C++ 规则/批量 PUCT、PyTorch Transformer、macOS MPS、自博弈最少手数与 score utility，已完成单机验证。
+- 更新：2026-10-20。
+- 当前重点：已完成跨局面集中推理与 MCTS 子树复用；下一步在目标 MPS 设备测量正式模型吞吐。
 
 ## 文档地图
 
@@ -38,3 +38,10 @@
 - 2026-10-15 纯自博弈更新最终验证：完整 CPU+Metal 测试 34 passed（2.78 秒）；新的 runs/zero-only-smoke 在 MPS 上完成 2 局、39 个训练局面、3 步训练和 2 局候选评测。无长期棋力结论。
 - 2026-10-16：新增 `--min-moves`，12 个专项测试通过；默认值 0 保持原行为。
 - 2026-10-17：已有 score head 接入可选 PUCT score utility；CLI 默认 0.05，不改 checkpoint config，可续接既有 9x9 run。
+
+## 2026-10-20 最新状态（优先于早期记录）
+
+- 集中推理服务与跨落子子树复用已完成，串行兼容；CLI/loop 支持运行时合批参数，checkpoint 配置不变。
+- 全套 109 passed、5 skipped（当前沙箱 MPS 不可用），真实 spawn/完整并行闭环通过。
+- CPU smoke 集中推理调用约减少 75%，但低负载搜索墙钟时间上升；GPU 加速幅度未验证。详见 changes.md、protocol.md 和 benchmarks/search_optimizations.py。
+- 下一步：正式 9x9 模型的 MPS 2/4/8 worker、batch/等待参数基准及长期棋力对照。

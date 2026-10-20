@@ -12,19 +12,28 @@ class Evaluator:
 
     @torch.inference_mode()
     def predict(self, boards):
+        return self.predict_arrays(np.stack([b.features() for b in boards]),
+                                   np.asarray([b.legal_mask() for b in boards], dtype=bool))
+
+    @torch.inference_mode()
+    def predict_arrays(self, features, legal):
         self.model.eval()
-        features = torch.from_numpy(np.stack([b.features() for b in boards])).to(self.device)
-        mask = torch.tensor([b.legal_mask() for b in boards], dtype=torch.bool, device=self.device)
+        features = torch.from_numpy(features).to(self.device)
+        mask = torch.from_numpy(legal).to(self.device, dtype=torch.bool)
         outputs = self.model(features, mask)
         policies = outputs["policy_logits"].softmax(-1)
         wdl = outputs["value_logits"].softmax(-1)
         values = wdl[:, 2] - wdl[:, 0]
         self.calls += 1
-        self.positions += len(boards)
+        self.positions += len(features)
         return outputs, policies, wdl, values
 
     def __call__(self, boards):
-        outputs, policies, wdl, values = self.predict(boards)
+        return self.evaluate_arrays(np.stack([b.features() for b in boards]),
+                                    np.asarray([b.legal_mask() for b in boards], dtype=bool))
+
+    def evaluate_arrays(self, features, legal):
+        outputs, policies, wdl, values = self.predict_arrays(features, legal)
         scores = outputs["score_mean"]
         return (policies.cpu().numpy().astype(np.float32),
                 values.cpu().numpy().astype(np.float32),
@@ -50,11 +59,36 @@ def analyze_position(board: Board, evaluator, config: SearchConfig, seed=0, scor
     return result
 
 
+class SearchSession:
+    """One game and one model's tree; advance after every actual move."""
+    def __init__(self):
+        self.tree = None
+        self.parameters = None
+
+    def advance(self, action):
+        return self.tree.advance(action) if self.tree is not None else False
+
+    def reset(self):
+        if self.tree is not None:
+            self.tree.reset()
+
+    def prepare(self, config, seed):
+        parameters = (config.c_puct, config.virtual_loss)
+        if self.tree is None or parameters != self.parameters:
+            self.tree = Search(*parameters, seed)
+            self.parameters = parameters
+        self.tree.reseed(seed)
+        return self.tree
+
+
 def search(board: Board, evaluator, config: SearchConfig, seed=0, noise=False, min_moves=0,
-           score_utility=0.0):
-    return Search(config.c_puct, config.virtual_loss, seed).run(
+           score_utility=0.0, session=None):
+    tree = (Search(config.c_puct, config.virtual_loss, seed) if session is None
+            else session.prepare(config, seed))
+    return tree.run(
         board, evaluator, config.simulations, config.batch_size,
         config.dirichlet_alpha, config.dirichlet_epsilon if noise else 0.0, min_moves, score_utility,
+        reuse=session is not None,
     )
 
 
