@@ -109,6 +109,19 @@ runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/summary.js
 
 各分项 loss 为加权前数值；`total` 是按 summary 中权重求和的优化目标，`grad_norm` 是裁剪前梯度范数。replay 分布会随训练变化，因此 loss 趋势需要结合评估结果判断，不能单凭下降认定棋力提高。
 
+## 清理旧 checkpoint 和 replay
+
+脚本默认预览 `runs/zero-9x9` 中修改时间早于当前时刻 24 小时的文件，添加 `--delete` 才实际删除：
+
+```bash
+.venv/bin/python scripts/cleanup_old_artifacts.py
+.venv/bin/python scripts/cleanup_old_artifacts.py --delete
+```
+
+清理范围为运行目录根部的 `.pt`，以及 `replay/`（含标签缓存子目录）下的 `.npz` 和 `.sgf`。始终保留根部 `best.pt`、`learner.pt`，并跳过符号链接；评估/观棋目录、训练 loss 和 iteration JSON 保留。删除前会再次检查文件年龄，已更新的文件跳过。
+
+“一天之前”按滚动 24 小时计算，不是当天零点。可用 `--older-than-hours 48` 改为两天前，或用 `--root runs/另一个运行目录` 指定 run；默认目录相对于脚本位置确定，不依赖启动时的当前目录。输出包含截止时间、文件清单及总字节数。训练正在加载 replay 时，应等这一阶段完成再执行删除，避免它已列出的文件在读取前被移除；下一次加载会使用剩余数据。
+
 ## 并行自博弈与评估
 
 ```bash
