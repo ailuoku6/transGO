@@ -1,0 +1,14 @@
+{
+  "temporary_directory": "/private/tmp/transformergo-coreml-loop.GIRCIm",
+  "config": "configs/smoke.yaml",
+  "selfplay_workers": 2,
+  "eval_workers": 2,
+  "inference_backend": "coreml",
+  "coreml_batch_size": 4,
+  "training_device": "mps",
+  "evaluation_games": 2,
+  "evaluation_backend": "coreml",
+  "replay_shards": 2,
+  "exit_code": 0,
+  "existing_run_modified": false
+}

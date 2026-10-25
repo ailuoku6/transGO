@@ -53,9 +53,10 @@ def discover_weights(root, initial_checkpoint=None):
 
 
 class PlayService:
-    def __init__(self, config, device, root, weights, default_id):
+    def __init__(self, config, device, root, weights, default_id, *, evaluator_options=None):
         self.root = Path(root).resolve()
         self.device = device
+        self.evaluator_options = evaluator_options or {}
         self.weights = list(weights)
         self.weight_paths = {}
         for item in self.weights:
@@ -88,7 +89,7 @@ class PlayService:
         model, config, payload = load_checkpoint(self.weight_paths[identity], self.device)
         self.weight_id = identity
         self.model, self.config = model, config
-        self.evaluator = Evaluator(model, self.device)
+        self.evaluator = Evaluator(model, self.device, **self.evaluator_options)
         self.search_config = deepcopy(config.search)
         self.checkpoint_info = {"id": identity, "step": int(payload.get("step", 0)),
                                 "board_size": config.board_size, "komi": config.komi,
@@ -213,6 +214,7 @@ class PlayService:
     def state(self):
         terminal = self.board.terminal() or self.resigned
         payload = {"weight": self.checkpoint_info, "size": self.board.size, "komi": self.board.komi,
+                   "inference_backend": self.evaluator.backend,
                    "rules": self.board.rules, "cells": list(self.board.cells),
                    "legal": list(self.board.legal_mask()), "player": self.board.to_play,
                    "human_color": self.human_color, "move_number": self.board.move_number,

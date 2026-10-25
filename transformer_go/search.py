@@ -5,10 +5,23 @@ from .config import SearchConfig
 
 
 class Evaluator:
-    def __init__(self, model, device):
+    def __init__(self, model, device, *, backend="torch", coreml_batch_size=16,
+                 coreml_cache_dir="runs/coreml"):
+        if backend not in ("torch", "coreml"):
+            raise ValueError("inference backend must be torch or coreml")
         self.model, self.device = model, device
+        self.backend = backend
+        self.coreml = None
+        if backend == "coreml":
+            from .coreml import CoreMLBackend
+            self.coreml = CoreMLBackend(model, coreml_batch_size, coreml_cache_dir)
         self.calls = 0
         self.positions = 0
+
+    def prepare(self, board_size):
+        """Compile before starting workers with bounded RPC request timeouts."""
+        if self.coreml is not None:
+            self.coreml._load_model(board_size)
 
     @torch.inference_mode()
     def predict(self, boards):
@@ -17,10 +30,15 @@ class Evaluator:
 
     @torch.inference_mode()
     def predict_arrays(self, features, legal):
-        self.model.eval()
-        features = torch.from_numpy(features).to(self.device)
-        mask = torch.from_numpy(legal).to(self.device, dtype=torch.bool)
-        outputs = self.model(features, mask)
+        if self.coreml is None:
+            self.model.eval()
+            features = torch.from_numpy(features).to(self.device)
+            mask = torch.from_numpy(legal).to(self.device, dtype=torch.bool)
+            outputs = self.model(features, mask)
+        else:
+            outputs = {name: torch.from_numpy(value) for name, value in self.coreml.predict(features).items()}
+            mask = torch.as_tensor(legal, dtype=torch.bool)
+            outputs["policy_logits"] = outputs["policy_logits"].masked_fill(~mask, float("-inf"))
         policies = outputs["policy_logits"].softmax(-1)
         wdl = outputs["value_logits"].softmax(-1)
         values = wdl[:, 2] - wdl[:, 0]

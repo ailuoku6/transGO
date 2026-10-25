@@ -1,12 +1,13 @@
 # 第一版实现状态
 
-更新：2026-10-21。
+更新：2026-10-25。
 
 | 模块 | 已实现 | 后续工作 |
 |---|---|---|
 | 规则 | KataGo `Board`/`BoardHistory`/`Rules` 原生核心、2~19 路、提子、四类 ko、禁自杀/自杀规则、button、双 pass 与 territory encore、Benson/pass-alive、独立生命/seki、死子归属、面积/territory 计分、历史特征、Zobrist | 与完整 KataGo 引擎的神经网络搜索、分布式协议和全部赛事级 GTP 行为整合 |
 | Transformer | Conv stem、二维坐标特征、局部/全局注意力、Pre-LN、SwiGLU、policy/WDL/score mean+variance/ownership/moves heads | 相对位置偏置、真正窗口分块、位置编码消融 |
 | Metal | MPS 自动检测、显式 mps、float32 训练与批量推理、设备同步 benchmark | profiler、实际 batch 吞吐调优、可选 autocast |
+| Neural Engine | 可选 Core ML CPU_AND_NE 推理、FP16 固定形状导出、全部预测头、合法 mask、按权重/棋盘/batch 缓存、集中合批与 loop/对弈接口接入、静态设备计划诊断 | 多局面/长时间吞吐与功耗基准；训练仍由 PyTorch/MPS 执行 |
 | MCTS | C++ PUCT、批量叶子、虚拟访问、根 Dirichlet、温度落子、精确目标预算、合法 mask、自博弈最少手数 pass 约束、可选 score utility、每局完整历史校验的落子子树复用 | 多线程共享树、FPU、动态 c_puct、playout-cap randomization |
 | 数据 | 原子 NPZ、自博弈 SGF 导出/查看、终局标签、视角/D8 增强、近期 replay window、校验 | streaming shards、优先回放、自动隔离坏 shard、多规则数据 |
 | 训练 | 仅自博弈 RL trainer、数据来源检查、checkpoint 来源记录、masked policy CE、WDL CE、score Gaussian NLL、ownership CE、moves Huber、AdamW、裁剪、恢复 RNG | warmup/scheduler、验证集、DDP、训练监控 |

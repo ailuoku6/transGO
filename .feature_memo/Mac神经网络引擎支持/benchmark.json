@@ -1,0 +1,77 @@
+{
+  "step": 327000,
+  "records": [
+    {
+      "backend": "torch",
+      "device": "mps",
+      "batch_size": 16,
+      "startup_seconds": 0.6049640839919448,
+      "search_seconds": [
+        0.35679920902475715,
+        0.30670633306726813,
+        0.32038608309812844
+      ],
+      "simulations": 200,
+      "max_abs_errors_policy_value_score": [
+        1.1920928955078125e-07,
+        5.960464477539063e-08,
+        3.725290298461914e-09
+      ]
+    },
+    {
+      "backend": "coreml",
+      "device": "cpu",
+      "batch_size": 16,
+      "startup_seconds": 5.902958499966189,
+      "search_seconds": [
+        0.11373787513002753,
+        0.10382000007666647,
+        0.10364179103635252
+      ],
+      "simulations": 200,
+      "max_abs_errors_policy_value_score": [
+        0.00038714706897735596,
+        0.0009031593799591064,
+        2.7474015951156616e-05
+      ],
+      "preferred_operations": {
+        "unknown": 327,
+        "MLNeuralEngineComputeDevice": 225
+      }
+    },
+    {
+      "backend": "coreml",
+      "device": "cpu",
+      "batch_size": 1,
+      "startup_seconds": 4.356714583002031,
+      "search_seconds": [
+        0.2048929159063846,
+        0.2086352079641074,
+        0.14768954110331833
+      ],
+      "simulations": 200,
+      "max_abs_errors_policy_value_score": [
+        0.00038714706897735596,
+        0.0009031593799591064,
+        2.7474015951156616e-05
+      ],
+      "preferred_operations": {
+        "unknown": 327,
+        "MLNeuralEngineComputeDevice": 225
+      }
+    }
+  ],
+  "checkpoint": "runs/zero-9x9/best.pt",
+  "board_size": 9,
+  "width": 192,
+  "layers": 8,
+  "measurement": "one empty-board position, 200 simulations, one warmup then three timings; excludes startup",
+  "platform": {
+    "machine": "arm64",
+    "macos": "27.0.1"
+  },
+  "torch": "2.14.1",
+  "coremltools": "9.0",
+  "runtime_utilization_measured": false,
+  "median_search_speedup": 3.085976525347115
+}

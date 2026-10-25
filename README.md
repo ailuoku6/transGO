@@ -2,7 +2,7 @@
 
 采用 AlphaGo Zero 式纯自博弈训练：网络从随机权重启动，训练数据全部来自自身 MCTS 对局。
 
-Python / PyTorch Transformer 策略价值网络，C++17 围棋规则和批量 PUCT 蒙特卡洛树搜索。macOS 上通过 **PyTorch MPS（Metal）** 运行网络推理和训练，规则和搜索运行在 CPU。`device: auto` 优先选择 MPS，再选择 CUDA、CPU；`device: mps` 会在 Metal 不可用时明确报错。
+Python / PyTorch Transformer 策略价值网络，C++17 围棋规则和批量 PUCT 蒙特卡洛树搜索。macOS 默认通过 **PyTorch MPS（Metal GPU）** 运行网络推理和训练，也可选择 **Core ML（CPU + Apple Neural Engine/NPU）** 进行网络推理；规则和搜索运行在 CPU。`device: auto` 优先选择 MPS，再选择 CUDA、CPU；`device: mps` 会在 Metal 不可用时明确报错。
 
 这是一版可运行的工程闭环，尚未经过足够数据训练，附带的 smoke checkpoint 仅用于验证流程，没有棋力保证。完整研究方案见 [TECHNICAL_PLAN.md](TECHNICAL_PLAN.md)，实现状态见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。
 
@@ -28,6 +28,47 @@ transformer-go doctor
 也提供 CMake 构建入口：配置时将 `Python_EXECUTABLE` 指向安装了 pybind11 的虚拟环境 Python。日常开发使用上面的 setuptools 命令即可。
 
 `doctor` 应显示 `mps_available: true`、`selected: mps`。某些执行沙箱不允许枚举 GPU，会显示 CPU；在 macOS 普通终端运行可以区分设备权限问题。程序没有默认启用 MPS CPU 算子回退，防止掩盖不支持的算子。
+
+## Mac NPU / Neural Engine 推理
+
+Apple Silicon、macOS 13+ 可安装可选依赖，在现有推理命令后添加 `--inference-backend coreml`：
+
+```bash
+.venv/bin/python -m pip install -e '.[coreml]'
+.venv/bin/transformer-go doctor
+
+# 先使用既有权重对照 MPS 与 Core ML；第一次转换/编译发生在预热阶段，不计入搜索耗时。
+.venv/bin/transformer-go benchmark --config configs/tiny.yaml \
+  --checkpoint runs/zero-9x9/best.pt --inference-backend torch
+.venv/bin/transformer-go benchmark --config configs/tiny.yaml \
+  --checkpoint runs/zero-9x9/best.pt --inference-backend coreml \
+  --coreml-batch-size 16 --coreml-compute-plan
+
+# 原有训练目录可继续接续；训练仍由 config.device 选择 PyTorch/MPS 设备。
+.venv/bin/transformer-go loop --config configs/tiny.yaml --output runs/zero-9x9 \
+  --iterations 1 --games 64 --steps 1000 --eval-games 200 \
+  --inference-backend coreml --coreml-batch-size 16
+```
+
+`selfplay`、`eval`、`loop`、`play`、`gtp`、`json-rpc` 和 `benchmark` 均支持这些后端选项。默认仍是 `torch`，旧命令及 checkpoint/replay schema 不变；不需要修改 `device` 为 `npu`。自博弈/评估的并行 CPU worker 仍共用父进程中的集中推理服务。`loop` 当前按阶段执行，训练阶段使用 MPS、推理阶段使用 Core ML，并非 GPU/NPU 同时训练。
+
+Core ML 用 `CPU_AND_NE` 允许 CPU 与 Neural Engine 执行，禁用 GPU；这不是 NPU 独占模式，具体分配由 macOS 决定。`doctor.coreml.hardware_eligible` 仅报告平台条件，`ane_execution_verified: false` 表示 doctor 未分析模型执行；可用 `benchmark --coreml-compute-plan` 查看该模型的静态 `preferred_operations`。它也不是实时 NPU 利用率，`runtime_utilization_measured` 明确为 false。旧系统不支持执行计划时返回诊断原因，不影响正常预测。
+
+推理导出为 FP16 计算、float32 输入/输出，保留全部预测头；合法着 mask、softmax、WDL 价值组合仍在 CPU 执行。每种棋盘尺寸按需生成固定形状模型，batch 默认 16，不足补零、超过拆分，返回时去掉补齐行。可以尝试 `--coreml-batch-size 1/4/16`，单局小批请求与多进程合批的最佳设置不同。`--inference-batch-size` 仍是集中服务的跨局面收集上限，含义不变。
+
+转换结果默认缓存到 `runs/coreml/`，由权重、模型结构、棋盘尺寸、batch、导出及软件版本区分；可用 `--coreml-cache-dir` 改路径。首次转换和系统编译有额外启动耗时，每轮 candidate 权重变化需要新的转换。并行模式会在启动 worker 前准备模型，避免首次编译耗尽推理 RPC 超时。显式选择 Core ML 时，依赖、平台或预测失败会报错，不会静默切回 PyTorch。
+
+本机现有 9x9、192 维/8 层、step 327000 的 best 权重，在空盘、200 次搜索、预热后测量 3 次，MPS 搜索耗时中位数为 0.320 秒，Core ML batch 16 为 0.104 秒（约 3.1 倍）；Core ML 静态计划有 225 个算子首选 Neural Engine。batch 1 中位数约 0.205 秒。此为单一局面和本机的局部基准，不代表完整自博弈/训练吞吐或棋力提升，也没有测量功耗。该次空盘的 policy/value/score 最大绝对误差约为 `3.9e-4 / 9.0e-4 / 2.8e-5`。原始结果在 `.feature_memo/Mac神经网络引擎支持/benchmark.json`。
+
+验证命令：
+
+```bash
+.venv/bin/python -m pytest -q
+# 需要可访问原生 Core ML 服务的 macOS 终端；普通 CI 默认跳过硬件测试。
+TRANSFORMER_GO_TEST_COREML=1 .venv/bin/python -m pytest tests/test_coreml.py -q -k real_coreml
+```
+
+本机已用 PyTorch 2.14.1 / coremltools 9.0 验证。coremltools 可能提示该 PyTorch 版本超出其官方测试范围；项目使用固定形状、显式注意力导出绕过已发现的转换问题，升级依赖后应重跑硬件测试。执行沙箱可能限制系统编译缓存或硬件访问，在普通 macOS 终端运行可区分权限问题。
 
 ## 先运行最小闭环
 

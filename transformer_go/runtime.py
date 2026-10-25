@@ -20,6 +20,15 @@ def seed_all(seed: int):
     torch.manual_seed(seed)
 
 
+def select_inference_device(requested="auto", backend="torch"):
+    """Core ML owns its devices; PyTorch only loads its source weights on CPU."""
+    if backend == "coreml":
+        return torch.device("cpu")
+    if backend != "torch":
+        raise ValueError("inference backend must be torch or coreml")
+    return select_device(requested)
+
+
 def synchronize(device: torch.device):
     if device.type == "mps":
         torch.mps.synchronize()
@@ -28,6 +37,7 @@ def synchronize(device: torch.device):
 
 
 def device_report() -> dict:
+    from .coreml import coreml_report
     return {"torch": torch.__version__, "mps_built": torch.backends.mps.is_built(),
             "mps_available": torch.backends.mps.is_available(), "cuda_available": torch.cuda.is_available(),
-            "selected": str(select_device())}
+            "selected": str(select_device()), "coreml": coreml_report()}

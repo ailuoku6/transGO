@@ -8,7 +8,7 @@ import numpy as np
 from ._native import Board
 from .config import from_dict
 from .checkpoint import load_checkpoint
-from .runtime import select_device
+from .runtime import select_inference_device
 from .search import search, choose_action, SearchSession
 from .search import Evaluator
 from .inference import InferenceServer, worker_evaluators, validate_batching
@@ -118,11 +118,13 @@ class _EvaluationRecorder:
         return {"sgf_path": str(path)}
 
 
-def _load_evaluation_models(raw, candidate_path, baseline_path, requested_device=None):
+def _load_evaluation_models(raw, candidate_path, baseline_path, requested_device=None,
+                            evaluator_options=None):
     """Load and validate both networks once in the parent process."""
     config = from_dict(raw)
     requested = config.device if requested_device is None else str(requested_device)
-    device = select_device(requested)
+    options = evaluator_options or {}
+    device = select_inference_device(requested, options.get("backend", "torch"))
     candidate, candidate_config, _ = load_checkpoint(candidate_path, device, selfplay_only=True)
     baseline, baseline_config, _ = load_checkpoint(baseline_path, device, selfplay_only=True)
     candidate_raw = candidate_config.to_dict()
@@ -137,7 +139,11 @@ def _load_evaluation_models(raw, candidate_path, baseline_path, requested_device
     if (candidate_raw["model"] != requested_raw["model"] or
             candidate_raw["board_size"] != requested_raw["board_size"]):
         raise ValueError("evaluation checkpoint configuration differs from requested config")
-    return {"candidate": Evaluator(candidate, device), "baseline": Evaluator(baseline, device)}
+    evaluators = {"candidate": Evaluator(candidate, device, **options),
+                  "baseline": Evaluator(baseline, device, **options)}
+    for evaluator in evaluators.values():
+        evaluator.prepare(config.board_size)
+    return evaluators
 
 
 def _init_evaluation_worker(raw, channels):
@@ -289,7 +295,8 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
                       workers=2, report=print, score_utility=0.0, *,
                       required_candidate_win_prop=None, seed=None, max_moves=1600,
                       device=None, inference_batch_size=256, inference_wait_ms=2.0,
-                      sgf_dir=None, temperature=None, candidate_name=None, baseline_name=None):
+                      sgf_dir=None, temperature=None, candidate_name=None, baseline_name=None,
+                      evaluator_options=None):
     """Evaluate in spawned processes while aggregating in deterministic order.
 
     At most ``workers`` games are in flight at once.  A gatekeeper decision is
@@ -310,6 +317,7 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
     settings["workers"] = worker_count
     settings["scheduler"] = "spawn-process-batches"
     settings["inference"] = "central-batched"
+    settings["inference_backend"] = (evaluator_options or {}).get("backend", "torch")
     settings["inference_batch_size"] = inference_batch_size
     settings["inference_wait_ms"] = inference_wait_ms
     recorder = _EvaluationRecorder(
@@ -327,7 +335,8 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
     stop_reason = "max_games"
     played = 0
     points = 0.0
-    evaluators = _load_evaluation_models(config.to_dict(), candidate_path, baseline_path, device)
+    evaluators = _load_evaluation_models(config.to_dict(), candidate_path, baseline_path, device,
+                                        evaluator_options)
     context = multiprocessing.get_context("spawn")
     with InferenceServer(evaluators, worker_count, context,
                          inference_batch_size, inference_wait_ms) as server, ProcessPoolExecutor(

@@ -1,7 +1,7 @@
 import argparse
 import json
 from .config import load_config
-from .runtime import device_report, seed_all, select_device
+from .runtime import device_report, seed_all, select_device, select_inference_device
 from .model import PolicyValueNet
 from .search import Evaluator
 from .selfplay import generate
@@ -20,20 +20,28 @@ def cmd_doctor(_):
     print(json.dumps(device_report(), indent=2))
 
 
+def evaluator_options(args):
+    if args.inference_backend == "torch":
+        return {}
+    return {"backend": args.inference_backend, "coreml_batch_size": args.coreml_batch_size,
+            "coreml_cache_dir": args.coreml_cache_dir}
+
+
 def cmd_selfplay(args):
     config = load_config(args.config)
     seed_all(config.seed)
     if args.workers < 1:
         raise ValueError("workers must be a positive integer")
     validate_batching(args.inference_batch_size, args.inference_wait_ms)
-    device = select_device(config.device)
+    device = select_inference_device(config.device, args.inference_backend)
     if args.workers > 1:
         from .actors import generate_parallel
         paths = generate_parallel(config, args.checkpoint, args.output, args.games, args.workers,
                                   args.seed, min_moves=args.min_moves, score_utility=args.score_utility,
                                   report=report, device=device,
                                   inference_batch_size=args.inference_batch_size,
-                                  inference_wait_ms=args.inference_wait_ms, selfplay_policy=args.selfplay_policy)
+                                  inference_wait_ms=args.inference_wait_ms, selfplay_policy=args.selfplay_policy,
+                                  evaluator_options=evaluator_options(args))
         report({"event": "parallel_selfplay_complete", "paths": paths})
         return
     model = PolicyValueNet(config.model).to(device)
@@ -42,11 +50,13 @@ def cmd_selfplay(args):
         version = model_version(args.checkpoint)
     else:
         version = "untrained"
-    evaluator = Evaluator(model, device)
+    evaluator = Evaluator(model, device, **evaluator_options(args))
     generate(config, evaluator, args.output, args.games, args.seed, version, report,
              min_moves=args.min_moves, score_utility=args.score_utility, selfplay_policy=args.selfplay_policy)
     print(json.dumps({"event": "selfplay_complete", "evaluator_calls": evaluator.calls,
-                      "positions": evaluator.positions, "device": str(device)}))
+                      "positions": evaluator.positions,
+                      "device": "coreml-cpu-and-ne" if evaluator.backend == "coreml" else str(device),
+                      "inference_backend": evaluator.backend}))
 
 
 def cmd_train(args):
@@ -67,12 +77,12 @@ def cmd_train(args):
 def cmd_gtp(args):
     config = load_config(args.config)
     seed_all(config.seed)
-    device = select_device(config.device)
+    device = select_inference_device(config.device, args.inference_backend)
     model = PolicyValueNet(config.model).to(device)
     if args.checkpoint:
         model, config, _ = load_checkpoint(args.checkpoint, device)
     from .gtp import GTP
-    GTP(config, Evaluator(model, device)).run()
+    GTP(config, Evaluator(model, device, **evaluator_options(args))).run()
 
 
 def cmd_eval(args):
@@ -81,7 +91,7 @@ def cmd_eval(args):
     if args.workers < 1:
         raise ValueError("workers must be a positive integer")
     validate_batching(args.inference_batch_size, args.inference_wait_ms)
-    device = select_device(config.device)
+    device = select_inference_device(config.device, args.inference_backend)
     recording = {"sgf_dir": args.sgf_dir, "temperature": args.temperature,
                  "candidate_name": f"{args.candidate} sha256={model_version(args.candidate)}",
                  "baseline_name": f"{args.baseline} sha256={model_version(args.baseline)}"}
@@ -92,13 +102,15 @@ def cmd_eval(args):
             score_utility=args.score_utility,
             required_candidate_win_prop=args.required_candidate_win_prop,
             seed=args.seed, device=device, inference_batch_size=args.inference_batch_size,
-            inference_wait_ms=args.inference_wait_ms, **recording), indent=2))
+            inference_wait_ms=args.inference_wait_ms, evaluator_options=evaluator_options(args),
+            **recording), indent=2))
         return
     candidate, saved, _ = load_checkpoint(args.candidate, device)
     baseline, previous, _ = load_checkpoint(args.baseline, device)
     if saved.board_size != config.board_size or previous.board_size != config.board_size:
         raise ValueError("evaluation board size differs from checkpoints")
-    print(json.dumps(evaluate(config, Evaluator(candidate, device), Evaluator(baseline, device), args.games,
+    print(json.dumps(evaluate(config, Evaluator(candidate, device, **evaluator_options(args)),
+                              Evaluator(baseline, device, **evaluator_options(args)), args.games,
                               report, score_utility=args.score_utility,
                               required_candidate_win_prop=args.required_candidate_win_prop,
                               seed=args.seed, **recording), indent=2))
@@ -113,27 +125,29 @@ def cmd_loop(args):
                  score_utility=args.score_utility, promote_threshold=args.required_candidate_win_prop,
                  selfplay_workers=args.selfplay_workers, eval_workers=args.eval_workers,
                  inference_batch_size=args.inference_batch_size,
-                 inference_wait_ms=args.inference_wait_ms, selfplay_policy=args.selfplay_policy)
+                 inference_wait_ms=args.inference_wait_ms, selfplay_policy=args.selfplay_policy,
+                 evaluator_options=evaluator_options(args))
 
 
 def cmd_rpc(args):
     from .rpc import RPC
     config = load_config(args.config)
-    device = select_device(config.device)
+    device = select_inference_device(config.device, args.inference_backend)
     if args.checkpoint: model, config, _ = load_checkpoint(args.checkpoint, device)
     else:
         seed_all(config.seed)
         model = PolicyValueNet(config.model).to(device)
-    RPC(config, Evaluator(model, device)).run()
+    RPC(config, Evaluator(model, device, **evaluator_options(args))).run()
 
 
 def cmd_play(args):
     from .web import serve
     from pathlib import Path
     config = load_config(args.config)
-    device = select_device(config.device)
+    device = select_inference_device(config.device, args.inference_backend)
     serve(config, device, Path(__file__).resolve().parent.parent,
-          checkpoint=args.checkpoint, host=args.host, port=args.port)
+          checkpoint=args.checkpoint, host=args.host, port=args.port,
+          evaluator_options=evaluator_options(args))
 
 
 def cmd_benchmark(args):
@@ -141,10 +155,12 @@ def cmd_benchmark(args):
     from .runtime import synchronize
     from .search import search
     config = load_config(args.config)
-    device = select_device(config.device)
+    device = select_inference_device(config.device, args.inference_backend)
     seed_all(config.seed)
     model = PolicyValueNet(config.model).to(device)
-    evaluator = Evaluator(model, device)
+    if args.checkpoint:
+        model, config, _ = load_checkpoint(args.checkpoint, device)
+    evaluator = Evaluator(model, device, **evaluator_options(args))
     board = Board(config.board_size, config.komi, config.rules)
     evaluator([board])
     synchronize(device)
@@ -152,9 +168,25 @@ def cmd_benchmark(args):
     result = search(board, evaluator, config.search, config.seed)
     synchronize(device)
     elapsed = time.perf_counter()-start
-    print(json.dumps({"device": str(device), "seconds": elapsed, "simulations": result["simulations"],
+    record = {"device": "coreml-cpu-and-ne" if evaluator.backend == "coreml" else str(device),
+                      "inference_backend": evaluator.backend,
+                      "compute_units": "CPU_AND_NE" if evaluator.backend == "coreml" else str(device),
+                      "coreml_batch_size": args.coreml_batch_size if evaluator.backend == "coreml" else None,
+                      "seconds": elapsed, "simulations": result["simulations"],
                       "simulations_per_second": result["simulations"]/elapsed,
-                      "evaluator_calls": evaluator.calls-1, "parameters": sum(p.numel() for p in model.parameters())}, indent=2))
+                      "evaluator_calls": evaluator.calls-1, "parameters": sum(p.numel() for p in model.parameters())}
+    if args.coreml_compute_plan and evaluator.coreml is not None:
+        record["coreml_compute_plan"] = evaluator.coreml.compute_plan_report(config.board_size)
+    print(json.dumps(record, indent=2))
+
+
+def add_backend_options(parser):
+    parser.add_argument("--inference-backend", choices=("torch", "coreml"), default="torch",
+                        help="network inference backend; coreml allows Apple CPU/Neural Engine (default: torch)")
+    parser.add_argument("--coreml-batch-size", type=int, default=16,
+                        help="fixed Core ML batch size; requests are padded/chunked (default: 16)")
+    parser.add_argument("--coreml-cache-dir", default="runs/coreml",
+                        help="cache converted Core ML packages by weights/shape (default: runs/coreml)")
 
 
 def add_inference_options(parser):
@@ -175,6 +207,8 @@ def main():
     doctor = sub.add_parser("doctor"); doctor.set_defaults(func=cmd_doctor)
     for name, func in (("selfplay", cmd_selfplay), ("train", cmd_train), ("gtp", cmd_gtp), ("json-rpc", cmd_rpc)):
         p = sub.add_parser(name); p.add_argument("--config", default="configs/tiny.yaml"); p.set_defaults(func=func)
+        if name != "train":
+            add_backend_options(p)
         if name == "selfplay":
             add_inference_options(p)
             add_selfplay_policy_option(p)
@@ -191,6 +225,7 @@ def main():
             p.add_argument("--metrics-dir", help="loss log directory (default: OUTPUT_PARENT/training/OUTPUT_STEM)")
         else: p.add_argument("--checkpoint")
     p = sub.add_parser("play", help="start the local human-vs-engine web UI")
+    add_backend_options(p)
     p.set_defaults(func=cmd_play)
     p.add_argument("--config", default="configs/tiny.yaml",
                    help="fallback config; checkpoint config is used when a weight is selected")
@@ -198,6 +233,7 @@ def main():
     p.add_argument("--host", default="127.0.0.1", help="listen address (default: localhost only)")
     p.add_argument("--port", type=int, default=8765, help="listen port (default: 8765)")
     p = sub.add_parser("eval"); p.set_defaults(func=cmd_eval)
+    add_backend_options(p)
     add_inference_options(p)
     p.add_argument("--config", default="configs/tiny.yaml")
     p.add_argument("--candidate", required=True); p.add_argument("--baseline", required=True)
@@ -214,6 +250,7 @@ def main():
     p.add_argument("--score-utility", type=float, default=0.05,
                    help="small score prediction contribution to MCTS utility (default: 0.05)")
     p = sub.add_parser("loop"); p.set_defaults(func=cmd_loop)
+    add_backend_options(p)
     add_inference_options(p)
     add_selfplay_policy_option(p)
     p.add_argument("--config", default="configs/tiny.yaml"); p.add_argument("--output", default="runs/loop")
@@ -232,7 +269,11 @@ def main():
     p.add_argument("--eval-workers", type=int, default=1,
                    help="spawned evaluation workers per match (default: 1)")
     p = sub.add_parser("benchmark"); p.set_defaults(func=cmd_benchmark)
+    add_backend_options(p)
     p.add_argument("--config", default="configs/tiny.yaml")
+    p.add_argument("--checkpoint", help="benchmark this checkpoint instead of random weights")
+    p.add_argument("--coreml-compute-plan", action="store_true",
+                   help="report Core ML static device preferences; does not measure NPU utilization")
     args = parser.parse_args(); args.func(args)
 
 

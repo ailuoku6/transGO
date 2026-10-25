@@ -111,7 +111,8 @@ def make_handler(service, host, port):
     return Handler
 
 
-def serve(config, device, root, *, checkpoint=None, host="127.0.0.1", port=8765):
+def serve(config, device, root, *, checkpoint=None, host="127.0.0.1", port=8765,
+          evaluator_options=None):
     try:
         is_loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
     except ValueError:
@@ -121,7 +122,7 @@ def serve(config, device, root, *, checkpoint=None, host="127.0.0.1", port=8765)
     if not 1 <= port <= 65535:
         raise ValueError("port must be in [1,65535]")
     weights, default_id = discover_weights(root, checkpoint)
-    service = PlayService(config, device, root, weights, default_id)
+    service = PlayService(config, device, root, weights, default_id, evaluator_options=evaluator_options)
     server = ThreadingHTTPServer((host, port), make_handler(service, host, port))
     print(f"Human vs engine: http://{host}:{server.server_port}", flush=True)
     try:
