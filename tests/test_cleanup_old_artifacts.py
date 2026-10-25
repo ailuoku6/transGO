@@ -17,7 +17,7 @@ def touch(path, mtime):
     return path
 
 
-def test_cleanup_preview_and_delete_are_scoped_and_keep_current_checkpoints(tmp_path):
+def test_cleanup_preview_and_delete_only_remove_old_unprotected_checkpoints(tmp_path):
     root = tmp_path / "run"
     old = NOW - 25 * 60 * 60
     recent = NOW - 23 * 60 * 60
@@ -33,14 +33,15 @@ def test_cleanup_preview_and_delete_are_scoped_and_keep_current_checkpoints(tmp_
     nested_checkpoint = touch(root / "inspection" / "snapshot.pt", old)
 
     preview = cleanup(root, now=NOW)
-    assert {path for path, _, _ in preview["candidates"]} == {old_candidate, old_npz, old_sgf}
+    assert {path for path, _, _ in preview["candidates"]} == {old_candidate}
     assert all(path.exists() for path, _, _ in preview["candidates"])
 
     deleted = cleanup(root, delete=True, now=NOW)
-    assert {path for path, _, _ in deleted["removed"]} == {old_candidate, old_npz, old_sgf}
-    assert not old_candidate.exists() and not old_npz.exists() and not old_sgf.exists()
+    assert {path for path, _, _ in deleted["removed"]} == {old_candidate}
+    assert not old_candidate.exists()
     assert old_best.exists() and old_learner.exists() and recent_candidate.exists()
-    assert recent_sgf.exists() and unrelated.exists() and old_log.exists()
+    assert old_npz.exists() and recent_sgf.exists() and old_sgf.exists()
+    assert unrelated.exists() and old_log.exists()
     assert nested_checkpoint.exists()
 
 

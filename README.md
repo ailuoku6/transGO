@@ -118,9 +118,9 @@ runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/summary.js
 .venv/bin/python scripts/cleanup_old_artifacts.py --delete
 ```
 
-清理范围为运行目录根部的 `.pt`，以及 `replay/`（含标签缓存子目录）下的 `.npz` 和 `.sgf`。始终保留根部 `best.pt`、`learner.pt`，并跳过符号链接；评估/观棋目录、训练 loss 和 iteration JSON 保留。删除前会再次检查文件年龄，已更新的文件跳过。
+清理范围仅为运行目录根部的旧 `.pt`。始终保留根部 `best.pt`、`learner.pt`，并跳过符号链接；`replay/` 下的 `.npz`、`.sgf`，以及评估/观棋目录、训练 loss 和 iteration JSON 均保留。删除前会再次检查文件年龄，已更新的文件跳过。
 
-“一天之前”按滚动 24 小时计算，不是当天零点。可用 `--older-than-hours 48` 改为两天前，或用 `--root runs/另一个运行目录` 指定 run；默认目录相对于脚本位置确定，不依赖启动时的当前目录。输出包含截止时间、文件清单及总字节数。训练正在加载 replay 时，应等这一阶段完成再执行删除，避免它已列出的文件在读取前被移除；下一次加载会使用剩余数据。
+“一天之前”按滚动 24 小时计算，不是当天零点。可用 `--older-than-hours 48` 改为两天前，或用 `--root runs/另一个运行目录` 指定 run；默认目录相对于脚本位置确定，不依赖启动时的当前目录。输出包含截止时间、文件清单及总字节数。训练、评估或对弈正在使用 checkpoint 时，应等当前进程完成后再执行删除，避免它在后续阶段需要重新读取某个待删除文件。
 
 ## 并行自博弈与评估
 
@@ -224,6 +224,22 @@ SGF 仅用于导出和查看自博弈记录，已移除将外部 SGF 转为训�
 
 ## 对弈与分析接口
 
+直接使用浏览器与本地引擎对弈：
+
+```bash
+.venv/bin/transformer-go play
+```
+
+默认从 `runs/` 下选择修改时间最新的 `best.pt`，并使用 checkpoint 自带的棋盘、规则和 200 次 MCTS 搜索配置。终端会显示本机地址，浏览器打开后可改选其他 `best.pt`、`candidate-*.pt`、`learner.pt` 或 checkpoint；切换权重在新对局时生效。可选择黑白、9/13/19 路棋盘和每手搜索预算，默认 200 次，也支持悔棋、停一手、认输、局面分析和 SGF 导出。服务仅监听本机回环地址。
+
+例如指定某个 checkpoint 和端口：
+
+```bash
+.venv/bin/transformer-go play --checkpoint runs/closed-loop-v2/best.pt --port 8766
+```
+
+对局时引擎每手使用最高访问次数落子；增加搜索预算会增加每手搜索量，但网页显示的网络胜率仍只是模型估计，不是正式棋力评级。终局胜负和目差来自现有 KataGo 规则核心。
+
 GTP 2 标准输入/输出接口：
 
 ```bash
@@ -276,7 +292,7 @@ benchmark 包含一次预热并同步 GPU，报告该配置下的搜索速度、
 - 达到最大手数仍未终局的自博弈局丢弃；不会用强制 pass 制造训练标签。
 - 评估 gatekeeper 使用 KataGo 的 `maxMovesPerGame` 风格强制计分：超过评估手数上限的局面通过 `BoardHistory` 当前分数计入 match points；无结果局按 0.5 分计入双方。自博弈仍丢弃未正式终局的局，避免把强制评估裁定混入训练标签。
 - NPZ shard 不使用 pickle，包含 schema、UUID、模型 SHA256、种子、搜索配置和规则元数据。写入先落临时文件再原子替换。float32 特征保留贴目与进度精度；未来规模化时再量化/迁移为流式 shards。
-- 训练使用均匀采样的近期 replay window、D8 对称增强、AdamW、梯度裁剪和 float32。Checkpoint 保存权重、优化器、训练步数、配置、采样 RNG，支持恢复训练。规则核心升级不会删除 `runs/` 下已有 checkpoint；继续同一 9x9 目录时，旧 replay 会通过 SGF 在 KataGo 规则下重放，只重算 value/score/ownership 标签，并写入 `.adjudication-cache/`，原 NPZ/SGF 与权重保持不变。新生成的 shard 会记录 `adjudication_version=katago-boardhistory-v1`。
+- 训练使用近期 replay window，并按 shard 新鲜度加权采样：最新选中的 shard 权重为最旧 shard 的 4 倍，同一 shard 内仍均匀；同时使用 D8 对称增强、AdamW、梯度裁剪和 float32。Checkpoint 保存权重、优化器、训练步数、配置、采样 RNG，支持恢复训练。规则核心升级不会删除 `runs/` 下已有 checkpoint；继续同一 9x9 目录时，旧 replay 会通过 SGF 在 KataGo 规则下重放，只重算 value/score/ownership 标签，并写入 `.adjudication-cache/`，原 NPZ/SGF 与权重保持不变。新生成的 shard 会记录 `adjudication_version=katago-boardhistory-v1`。
 - 局部注意力当前用 dense attention mask 实现，表达局部先验但没有稀疏窗口算子的性能收益；C++ 单树批量搜索使用叶子预留/虚拟损失，尚未实现多线程共享树。
 
 ## 已验证

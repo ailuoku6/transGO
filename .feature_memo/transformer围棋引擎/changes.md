@@ -1,5 +1,13 @@
 # 实现日志
 
+## 2026-10-22 旧文件清理脚本
+
+- 新增 `scripts/cleanup_old_artifacts.py`，纯 Python 标准库，无需重编。默认 run 为项目 runs/zero-9x9；按修改时间早于当前 24 小时筛选，不使用当天零点。
+- 范围：根目录 .pt、replay 递归 .npz/.sgf（含标签缓存）；固定保留 best.pt/learner.pt。默认 dry-run，--delete 才删除；--root 和 --older-than-hours 可配置。跳过符号链接，unlink 前复查年龄，错误返回非零。
+- 新增 10 项测试通过，覆盖预览、真实临时文件删除、保留权重/其他目录、截止边界、非法参数、符号链接、扫描后被更新的文件。
+- 真实目录只预览，列出 7,816 个文件、1,830,374,923 字节（约 1.70 GiB）；截止为上海时间 2026-10-21 20:49:01。此轮没有删除用户数据。
+- README 增加命令和运行范围。replay 正在读取时不应并发执行删除；本脚本未接入训练自动清理或计划任务。
+
 ## 2026-10-21 KataGo 式探索与训练 loss
 
 - 用户授权对照本地 KataGo 策略优化并记录每轮 loss。参考 d91ea855 的 selfplay1_maxsize9.cfg、searchhelpers/searchresults/searchexplorehelpers；默认 runtime profile=katago，可选 legacy，不改 checkpoint Config。

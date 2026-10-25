@@ -1,7 +1,7 @@
 # Transformer 围棋引擎
 
 - 状态：第一版闭环已实现，研究路线继续迭代。
-- 更新：2026-10-21。
+- 更新：2026-10-22。
 - 当前重点：KataGo 式自博弈探索与逐轮/逐步 loss 已落地；后续验证真实棋力与目标 GPU 吞吐。
 
 ## 文档地图
@@ -16,7 +16,12 @@
 - `handoff.md`：继续开发入口。
 - `diagnostics-2026-10-20.md`：探索长尾、replay 新旧比例及低概率落子源码核对。
 
-## 2026-10-21 最新事实（优先于历史记录）
+## 2026-10-22 清理脚本
+
+- `scripts/cleanup_old_artifacts.py` 默认预览 zero-9x9 中超过滚动 24 小时的根目录 .pt 和 replay 内 .npz/.sgf；`--delete` 执行，`--root`/`--older-than-hours` 可配置。始终保留 best.pt/learner.pt，跳过符号链接。
+- 10 项专项测试通过；真实目录仅预览，未执行删除。README 新增运行方法。
+
+## 2026-10-21 策略与 loss
 
 - 默认 `--selfplay-policy katago`：0.75→0.15 温度、policy-shaped Dirichlet、简化 PUCT 回顾性权重修正；支持 `legacy`，不改 Config/checkpoint。未移植 LCB/分叉局/廉价搜索。
 - loss：每步 steps.jsonl，训练成功后原子 summary.json，loop 在评估前追加 training-loss.csv，iteration JSON 含汇总；每次尝试独立路径。

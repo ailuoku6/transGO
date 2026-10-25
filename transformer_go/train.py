@@ -32,7 +32,10 @@ def train(config, model, device, directory, output, steps=100, resume=None, repo
         raise ValueError("invalid training budget")
     if resume is not None:
         require_selfplay_origin(resume)
-    replay = load_replay(directory, config.board_size, config.train.replay_positions)
+    replay, sampling_weights = load_replay(
+        directory, config.board_size, config.train.replay_positions,
+        return_sampling_weights=True)
+    sampling_probability = sampling_weights / sampling_weights.sum()
     rng = np.random.default_rng(config.seed)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay)
     start = 0
@@ -50,7 +53,8 @@ def train(config, model, device, directory, output, steps=100, resume=None, repo
     log = TrainingLog(metrics_dir, output, start, steps, iteration)
     try:
         for step in range(start+1, start+steps+1):
-            indices = rng.integers(len(replay["value"]), size=config.train.batch_size)
+            indices = rng.choice(len(replay["value"]), size=config.train.batch_size,
+                                 replace=True, p=sampling_probability)
             batch = augment({k: v[indices] for k, v in replay.items()}, rng)
             batch = {k: torch.from_numpy(np.ascontiguousarray(v)).to(device) for k, v in batch.items()}
             optimizer.zero_grad(set_to_none=True)

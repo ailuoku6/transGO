@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import numpy as np
 import pytest
@@ -9,7 +10,7 @@ from transformer_go.runtime import seed_all
 from transformer_go.model import PolicyValueNet
 from transformer_go.search import Evaluator
 from transformer_go.selfplay import generate
-from transformer_go.data import read_shard, augment
+from transformer_go.data import read_shard, augment, load_replay, write_shard
 from transformer_go.train import train, losses
 from transformer_go.checkpoint import load_checkpoint
 from transformer_go.sgf import parse
@@ -69,6 +70,34 @@ def test_selfplay_train_resume_sgf_roundtrip(tmp_path):
     train(config, continuous, torch.device("cpu"), tmp_path/"replay", tmp_path/"continuous.pt", 3, report=lambda _: None)
     for key, value in continuous.state_dict().items():
         torch.testing.assert_close(value, restored.state_dict()[key], rtol=0, atol=0)
+
+
+def test_replay_sampling_weights_prioritize_newer_shards(tmp_path):
+    n, positions = 3, 2
+
+    def make_data(value):
+        board = Board(n, 0.5)
+        return {
+            "features": np.repeat(board.features()[None], positions, axis=0).astype(np.float32),
+            "legal": np.ones((positions, n*n+1), dtype=bool),
+            "policy": np.full((positions, n*n+1), 1/(n*n+1), dtype=np.float32),
+            "value": np.full(positions, value, dtype=np.int64),
+            "score": np.zeros(positions, dtype=np.float32),
+            "ownership": np.ones((positions, n, n), dtype=np.int64),
+            "moves_left": np.ones(positions, dtype=np.float32),
+            "aux_mask": np.ones(positions, dtype=np.float32),
+        }
+
+    old = write_shard(tmp_path, make_data(0), {"source": "selfplay", "board_size": n})
+    new = write_shard(tmp_path, make_data(2), {"source": "selfplay", "board_size": n})
+    old_time = 1_000
+    os.utime(old, (old_time, old_time))
+    os.utime(new, (old_time + 1, old_time + 1))
+
+    replay, weights = load_replay(tmp_path, n, positions * 2, return_sampling_weights=True)
+    np.testing.assert_array_equal(replay["value"], [2, 2, 0, 0])
+    np.testing.assert_array_equal(weights[:2], [4.0, 4.0])
+    np.testing.assert_array_equal(weights[2:], [1.0, 1.0])
 
 
 def test_symmetry_keeps_legal_policy_aligned():

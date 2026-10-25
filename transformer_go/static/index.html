@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#eef0f2">
+  <title>Transformer Go · 人机对弈</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Transformer Go 首页">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span><strong>Transformer Go</strong><small>PLAY ROOM</small></span>
+    </a>
+    <div class="topbar-right">
+      <span class="local-indicator"><i></i> 本机引擎</span>
+      <span class="version" id="topStatus">正在连接</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="game-column" aria-label="棋局">
+      <div class="game-heading">
+        <div>
+          <div class="eyebrow">HUMAN VS ENGINE</div>
+          <h1>人机对弈</h1>
+        </div>
+        <div class="turn-indicator" id="turnIndicator"><span class="turn-stone"></span><span>载入棋局</span></div>
+      </div>
+
+      <div class="board-stage">
+        <div class="board-wrap" id="boardWrap">
+          <svg id="board" class="board" role="img" aria-label="围棋棋盘"></svg>
+        </div>
+      </div>
+
+      <div class="board-footer">
+        <div class="coordinates-note" id="boardCaption">9 路 · 中国规则 · 黑先</div>
+        <div class="board-actions">
+          <button class="icon-button" id="undoButton" title="悔棋" aria-label="悔棋" disabled><span class="icon">↶</span></button>
+          <button class="icon-button" id="passButton" title="停一手" aria-label="停一手" disabled><span class="icon pass-icon">Ⅱ</span></button>
+          <button class="icon-button" id="sgfButton" title="导出 SGF" aria-label="导出 SGF"><span class="icon download-icon">↓</span></button>
+        </div>
+      </div>
+      <div class="game-result" id="gameResult" hidden></div>
+    </section>
+
+    <aside class="side-panel" aria-label="对弈设置与信息">
+      <section class="setup-section">
+        <div class="section-title"><span>对局设置</span><span class="section-line"></span></div>
+        <label class="field-label" for="weightSelect">模型权重</label>
+        <select id="weightSelect" class="field-control" disabled></select>
+        <div class="weight-meta" id="weightMeta">正在读取权重信息</div>
+
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="sizeSelect">棋盘</label>
+            <select id="sizeSelect" class="field-control compact">
+              <option value="9">9 路</option>
+              <option value="13">13 路</option>
+              <option value="19">19 路</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label" for="komiInput">贴目</label>
+            <input id="komiInput" class="field-control compact" type="number" step="0.5" value="7.5">
+          </div>
+        </div>
+
+        <label class="field-label">执子</label>
+        <div class="segmented" role="group" aria-label="选择执子">
+          <button type="button" class="segment active" data-color="1"><span class="stone-dot black"></span>黑棋</button>
+          <button type="button" class="segment" data-color="-1"><span class="stone-dot white"></span>白棋</button>
+        </div>
+
+        <label class="field-label" for="simulationsSelect">每手搜索量</label>
+        <select id="simulationsSelect" class="field-control">
+          <option value="auto">模型默认</option>
+          <option value="200">200 次</option>
+          <option value="400">400 次</option>
+          <option value="800">800 次</option>
+          <option value="1600">1,600 次</option>
+        </select>
+        <button class="primary-button" id="newGameButton" disabled><span class="button-plus">+</span>开始新对局</button>
+      </section>
+
+      <section class="match-section">
+        <div class="section-title"><span>当前对局</span><span class="section-line"></span></div>
+        <div class="players">
+          <div class="player-row" id="humanPlayer">
+            <span class="player-stone black"></span>
+            <span class="player-name">你 <small>人类</small></span>
+            <span class="player-tag">执黑</span>
+          </div>
+          <div class="player-row" id="enginePlayer">
+            <span class="player-stone white"></span>
+            <span class="player-name">Transformer Go <small>引擎</small></span>
+            <span class="player-tag">执白</span>
+          </div>
+        </div>
+        <div class="stats-grid">
+          <div class="stat"><span>手数</span><strong id="moveCount">0</strong></div>
+          <div class="stat"><span>搜索预算</span><strong id="budgetValue">200</strong></div>
+        </div>
+        <div class="engine-report" id="engineReport">
+          <span class="report-label">最近搜索</span>
+          <strong id="engineMove">尚无落子</strong>
+          <span class="report-detail" id="engineDetail">开始对局后显示引擎搜索数据</span>
+        </div>
+      </section>
+
+      <section class="analysis-section">
+        <div class="section-title"><span>局面分析</span><span class="section-line"></span></div>
+        <button class="secondary-button" id="analyzeButton" disabled><span class="analyze-symbol">⌕</span>分析当前局面</button>
+        <div class="analysis-result" id="analysisResult" hidden>
+          <div class="analysis-summary"><span>网络胜率估计</span><strong id="winrateValue">--</strong></div>
+          <div class="candidate-title">搜索推荐</div>
+          <ol class="candidate-list" id="candidateList"></ol>
+        </div>
+      </section>
+
+      <div class="side-bottom">
+        <button class="resign-button" id="resignButton" disabled>认输</button>
+        <span class="rules-label">中国规则 · 面积计分</span>
+      </div>
+    </aside>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -18,5 +18,8 @@ transformer-go = "transformer_go.cli:main"
 [tool.setuptools.packages.find]
 include = ["transformer_go*"]
 
+[tool.setuptools.package-data]
+transformer_go = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

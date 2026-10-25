@@ -1,2 +1,3 @@
 include cpp/native.cpp
 recursive-include cpp/vendor/katago *.h *.cpp *.hpp *.md LICENSE CONTRIBUTORS
+recursive-include transformer_go/static *.html *.css *.js

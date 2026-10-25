@@ -127,6 +127,15 @@ def cmd_rpc(args):
     RPC(config, Evaluator(model, device)).run()
 
 
+def cmd_play(args):
+    from .web import serve
+    from pathlib import Path
+    config = load_config(args.config)
+    device = select_device(config.device)
+    serve(config, device, Path(__file__).resolve().parent.parent,
+          checkpoint=args.checkpoint, host=args.host, port=args.port)
+
+
 def cmd_benchmark(args):
     import time
     from .runtime import synchronize
@@ -181,6 +190,13 @@ def main():
             p.add_argument("--steps", type=int, default=100); p.add_argument("--resume")
             p.add_argument("--metrics-dir", help="loss log directory (default: OUTPUT_PARENT/training/OUTPUT_STEM)")
         else: p.add_argument("--checkpoint")
+    p = sub.add_parser("play", help="start the local human-vs-engine web UI")
+    p.set_defaults(func=cmd_play)
+    p.add_argument("--config", default="configs/tiny.yaml",
+                   help="fallback config; checkpoint config is used when a weight is selected")
+    p.add_argument("--checkpoint", help="initial weight (defaults to the newest runs/**/best.pt)")
+    p.add_argument("--host", default="127.0.0.1", help="listen address (default: localhost only)")
+    p.add_argument("--port", type=int, default=8765, help="listen port (default: 8765)")
     p = sub.add_parser("eval"); p.set_defaults(func=cmd_eval)
     add_inference_options(p)
     p.add_argument("--config", default="configs/tiny.yaml")

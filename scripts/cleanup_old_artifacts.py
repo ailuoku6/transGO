@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Preview or remove old model checkpoints and self-play replay artifacts."""
+"""Preview or remove old model checkpoints."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
 import math
-import os
 from pathlib import Path
 
 
@@ -14,26 +13,18 @@ PROTECTED_CHECKPOINTS = {"best.pt", "learner.pt"}
 
 def find_old_artifacts(root: Path, cutoff: float):
     """Return old target files as (path, size, mtime), without following symlinks."""
-    replay = root / "replay"
     candidates = []
-    scopes = [list(root.glob("*.pt"))]
-    if replay.is_dir() and not replay.is_symlink():
-        # os.walk does not descend into directory symlinks by default.
-        scopes.append([Path(directory) / name
-                       for directory, _, names in os.walk(replay, followlinks=False)
-                       for name in names if Path(name).suffix in {".npz", ".sgf"}])
-    for paths in scopes:
-        for path in paths:
-            if path.is_symlink() or not path.is_file():
-                continue
-            if path.parent == root and path.name in PROTECTED_CHECKPOINTS:
-                continue
-            try:
-                stat = path.stat()
-            except FileNotFoundError:
-                continue
-            if stat.st_mtime < cutoff:
-                candidates.append((path, stat.st_size, stat.st_mtime))
+    for path in root.glob("*.pt"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.name in PROTECTED_CHECKPOINTS:
+            continue
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        if stat.st_mtime < cutoff:
+            candidates.append((path, stat.st_size, stat.st_mtime))
     return sorted(candidates, key=lambda item: (item[2], str(item[0])))
 
 

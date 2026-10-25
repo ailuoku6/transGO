@@ -9,6 +9,8 @@ from .sgf import parse
 SCHEMA_VERSION = 1
 ADJUDICATION_VERSION = "katago-boardhistory-v1"
 FIELDS = ("features", "legal", "policy", "value", "score", "ownership", "moves_left", "aux_mask")
+OLDEST_REPLAY_WEIGHT = 1.0
+NEWEST_REPLAY_WEIGHT = 4.0
 
 
 def validate(data: dict):
@@ -155,7 +157,14 @@ def _relabel_legacy_shard(path: Path, data: dict, metadata: dict) -> tuple[dict,
     return corrected, corrected_meta
 
 
-def load_replay(directory: str | Path, size: int, max_positions: int):
+def load_replay(directory: str | Path, size: int, max_positions: int, *,
+                return_sampling_weights=False):
+    """Load a recent replay window and optional per-position freshness weights.
+
+    Shards are read newest first. The returned weights are constant within a
+    shard and linearly decrease from ``NEWEST_REPLAY_WEIGHT`` for the newest
+    selected shard to ``OLDEST_REPLAY_WEIGHT`` for the oldest selected shard.
+    """
     chunks, count, seen = [], 0, set()
     files = sorted(Path(directory).glob("*.npz"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
     for path in files:
@@ -176,7 +185,16 @@ def load_replay(directory: str | Path, size: int, max_positions: int):
             break
     if not chunks:
         raise ValueError(f"no replay positions for {size}x{size} in {directory}")
-    return {k: np.concatenate([c[k] for c in chunks]) for k in FIELDS}
+    replay = {k: np.concatenate([c[k] for c in chunks]) for k in FIELDS}
+    if not return_sampling_weights:
+        return replay
+    shard_count = len(chunks)
+    weights = []
+    for rank, chunk in enumerate(chunks):
+        progress = rank / max(shard_count - 1, 1)
+        weight = NEWEST_REPLAY_WEIGHT + progress * (OLDEST_REPLAY_WEIGHT - NEWEST_REPLAY_WEIGHT)
+        weights.append(np.full(len(chunk["value"]), weight, dtype=np.float64))
+    return replay, np.concatenate(weights)
 
 
 def transform_spatial(x, symmetry: int):

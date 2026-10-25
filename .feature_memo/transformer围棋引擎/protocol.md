@@ -1,5 +1,11 @@
 # 接口与数据
 
+## 2026-10-22 手动清理接口
+
+- 标准库脚本 scripts/cleanup_old_artifacts.py：--root 默认项目 runs/zero-9x9；--older-than-hours 默认 24，必须正有限数；--delete 才执行删除。
+- 严格 mtime < 当前时刻 - 小时数；根目录 .pt 和 replay 递归 .npz/.sgf，包括 .adjudication-cache；根目录 best.pt/learner.pt 始终保留。无跟随符号链接，评估/观棋 SGF、loss/iteration JSON 不清理。
+- 默认 dry-run 输出文件清单和总字节数；删除前复查年龄，文件已更新则跳过。可重复执行；删除错误退出码 1，参数错误 2；没有定时或自动接入训练 loop。
+
 ## 2026-10-21 策略与日志增量
 
 - 以下新约定优先于旧策略 target 描述。Config/checkpoint schema 不变；selfplay/loop runtime 参数 selfplay_policy 默认 katago，可选 legacy。

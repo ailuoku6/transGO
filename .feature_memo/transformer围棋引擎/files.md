@@ -1,5 +1,10 @@
 # 文件
 
+## 2026-10-22 清理脚本
+
+- `scripts/cleanup_old_artifacts.py`：滚动时间筛选、预览/删除和权重保护，独立标准库脚本。
+- `tests/test_cleanup_old_artifacts.py`：10 项临时文件与安全边界测试；`README.md`：清理命令及运行范围。
+
 ## 2026-10-21 最新修改
 
 - `transformer_go/exploration.py`：katago/legacy profile、温度与审计元数据。

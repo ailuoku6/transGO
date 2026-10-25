@@ -1,4 +1,8 @@
-# 最新接续：KataGo 式探索与 loss（2026-10-21）
+# 最新接续：清理脚本（2026-10-22）
+
+用户要求可重复清理一天前文件。新增 scripts/cleanup_old_artifacts.py：默认 dry-run，--delete 执行；默认项目 runs/zero-9x9，--root/--older-than-hours 可改。严格超过滚动 24 小时，根目录 .pt、replay 递归 .npz/.sgf，保护 best.pt/learner.pt，不跟随符号链接。10 个专项测试通过；真实目录仅预览，未删除。README 已说明。未接入自动任务；读取 replay 时需避免并发删除。
+
+# KataGo 式探索与 loss（2026-10-21）
 
 用户授权的策略优化和逐轮 loss 已完成。先看 README 的“自博弈探索策略”“每轮训练 loss”、protocol.md 最新节和 changes.md。之前评估 SGF、零温度观棋及 diagnostics-2026-10-20.md 均保留；未提交本轮改动，未停止/重启用户训练，未改原 run 权重/replay。
 
