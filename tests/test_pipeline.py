@@ -100,6 +100,94 @@ def test_replay_sampling_weights_prioritize_newer_shards(tmp_path):
     np.testing.assert_array_equal(weights[2:], [1.0, 1.0])
 
 
+def test_replay_skips_identical_games_with_different_ids(tmp_path, monkeypatch):
+    board = Board(3, 0.5)
+    data = {"features": board.features()[None], "legal": np.asarray(board.legal_mask())[None],
+            "policy": np.full((1, 10), 0.1, dtype=np.float32),
+            "value": np.array([0]), "score": np.zeros(1, dtype=np.float32),
+            "ownership": np.ones((1, 3, 3), dtype=np.int64),
+            "moves_left": np.ones(1, dtype=np.float32), "aux_mask": np.ones(1, dtype=np.float32)}
+    first = write_shard(tmp_path, data, {"source": "selfplay", "board_size": 3})
+    duplicate = write_shard(tmp_path, data, {"source": "selfplay", "board_size": 3})
+    distinct = write_shard(tmp_path, {**data, "value": np.array([2])},
+                           {"source": "selfplay", "board_size": 3})
+    for i, path in enumerate((first, duplicate, distinct)):
+        os.utime(path, (1000+i, 1000+i))
+    replay = load_replay(tmp_path, 3, 3)
+    np.testing.assert_array_equal(replay["value"], [2, 0])
+    monkeypatch.setattr("transformer_go.data._training_signature", lambda _: (0,))
+    # Even a complete signature collision cannot discard distinct arrays.
+    replay = load_replay(tmp_path, 3, 3)
+    np.testing.assert_array_equal(replay["value"], [2, 0])
+    foreign = write_shard(tmp_path, data, {"source": "expert", "board_size": 3})
+    os.utime(foreign, (999, 999))
+    with pytest.raises(ValueError, match="non-selfplay"):
+        load_replay(tmp_path, 3, 3)
+
+
+def test_selfplay_seed_blocks_survive_restart_and_import_history(tmp_path):
+    from transformer_go.actors import selfplay_game_seed
+    from transformer_go.seed_ledger import reserve_seed_block
+    from transformer_go.selfplay import MAX_ATTEMPTS_PER_GAME
+
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    np.savez_compressed(replay_dir / "legacy.npz",
+                        metadata=np.asarray(json.dumps({"seed": 1000})))
+
+    def seeds(base):
+        return [selfplay_game_seed(base, game) + retry
+                for game in range(64) for retry in range(MAX_ATTEMPTS_PER_GAME)]
+
+    first = reserve_seed_block(replay_dir, 64 * MAX_ATTEMPTS_PER_GAME, 42)
+    second = reserve_seed_block(replay_dir, 64 * MAX_ATTEMPTS_PER_GAME, 42)
+    assert first == 1001
+    current, following = seeds(first), seeds(second)
+    assert len(set(current)) == len(current)
+    assert set(current).isdisjoint(following)
+    assert 1000 not in current + following
+
+
+def test_seed_reservations_are_atomic_across_connections(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from transformer_go.seed_ledger import reserve_seed_block
+
+    replay_dir = tmp_path / "replay"
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        starts = list(pool.map(lambda _: reserve_seed_block(replay_dir, 10, 42), range(16)))
+    assert sorted(starts) == list(range(42, 202, 10))
+
+
+def test_seed_ledger_fails_closed_on_unseeded_history(tmp_path):
+    from transformer_go.seed_ledger import reserve_seed_block
+
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    old = replay_dir / "old.npz"
+    np.savez_compressed(old, metadata=np.asarray(json.dumps({"source": "selfplay"})))
+    with pytest.raises(ValueError, match="no valid seed"):
+        reserve_seed_block(replay_dir, 10, 42)
+    old.unlink()
+    assert reserve_seed_block(replay_dir, 10, 42) == 42
+
+
+def test_failed_selfplay_attempts_burn_reserved_seeds(tmp_path, monkeypatch):
+    from transformer_go.selfplay import MAX_ATTEMPTS_PER_GAME
+
+    config = load_config("configs/smoke.yaml")
+    used = []
+
+    def discard(_config, _evaluator, seed, *_args, **_kwargs):
+        used.append(seed)
+        return None
+
+    monkeypatch.setattr("transformer_go.selfplay.play_game", discard)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="too many truncated games"):
+            generate(config, None, tmp_path / "replay", report=lambda _: None)
+    assert used == list(range(config.seed, config.seed + 2 * MAX_ATTEMPTS_PER_GAME))
+
+
 def test_symmetry_keeps_legal_policy_aligned():
     n = 3
     data = {"features": np.arange(21*n*n, dtype=np.float32).reshape(1, 21, n, n),

@@ -5,6 +5,9 @@ from .search import search, choose_action, SearchSession
 from .data import write_shard
 from .sgf import dumps
 from .exploration import validate_profile, selfplay_temperature, exploration_settings
+from .seed_ledger import reserve_seed_block
+
+MAX_ATTEMPTS_PER_GAME = 10
 
 
 def validate_min_moves(board_size, min_moves, max_moves=None):
@@ -78,14 +81,21 @@ def play_game(config, evaluator, seed, model_version="untrained", max_moves=None
 
 
 def generate(config, evaluator, directory, games=1, seed=None, model_version="untrained", report=print,
-             min_moves=0, score_utility=0.0, selfplay_policy="katago"):
+             min_moves=0, score_utility=0.0, selfplay_policy="katago", *, _seeds_reserved=False):
     if games < 1:
         raise ValueError("games must be positive")
     validate_min_moves(config.board_size, min_moves)
     validate_profile(selfplay_policy)
+    requested_seed = config.seed if seed is None else seed
+    if _seeds_reserved:
+        if type(requested_seed) is not int or requested_seed < 0:
+            raise ValueError("reserved seed must be a nonnegative integer")
+        base_seed = requested_seed
+    else:
+        base_seed = reserve_seed_block(directory, games * MAX_ATTEMPTS_PER_GAME, requested_seed)
     completed, attempts = [], 0
-    while len(completed) < games and attempts < games*10:
-        game_seed = (config.seed if seed is None else seed) + attempts
+    while len(completed) < games and attempts < games*MAX_ATTEMPTS_PER_GAME:
+        game_seed = base_seed + attempts
         attempts += 1
         result = play_game(config, evaluator, game_seed, model_version, min_moves=min_moves,
                            score_utility=score_utility, selfplay_policy=selfplay_policy)

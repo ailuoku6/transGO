@@ -6,12 +6,18 @@ from .model import PolicyValueNet
 from .runtime import seed_all, select_inference_device
 from .checkpoint import load_checkpoint, model_version
 from .search import Evaluator
-from .selfplay import generate, validate_min_moves
+from .selfplay import generate, validate_min_moves, MAX_ATTEMPTS_PER_GAME
 from .inference import InferenceServer, worker_evaluators, validate_batching
 from .exploration import validate_profile
+from .seed_ledger import reserve_seed_block
 
 
 _ACTOR_STATE = None
+
+
+def selfplay_game_seed(base_seed, game_index):
+    # A single-game actor may retry up to MAX_ATTEMPTS_PER_GAME times.
+    return base_seed + game_index * MAX_ATTEMPTS_PER_GAME
 
 
 def _load_actor(raw, checkpoint, requested_device=None, evaluator_options=None):
@@ -36,7 +42,8 @@ def _init_actor(raw, channels, version):
     _ACTOR_STATE = (from_dict(raw), worker_evaluators(channels, ("selfplay",))[0], version)
 
 
-def _actor_game_task(output, seed, min_moves=0, score_utility=0.0, selfplay_policy="legacy"):
+def _actor_game_task(output, seed, min_moves=0, score_utility=0.0, selfplay_policy="legacy",
+                     seeds_reserved=False):
     # Older already-running parent processes submit only four arguments.
     # New parents always pass an explicit profile, including the new default.
     if _ACTOR_STATE is None:
@@ -45,7 +52,8 @@ def _actor_game_task(output, seed, min_moves=0, score_utility=0.0, selfplay_poli
     events = []
     paths = generate(config, evaluator, output, games=1, seed=seed,
                      model_version=version, report=events.append, min_moves=min_moves,
-                     score_utility=score_utility, selfplay_policy=selfplay_policy)
+                     score_utility=score_utility, selfplay_policy=selfplay_policy,
+                     _seeds_reserved=seeds_reserved)
     return [str(p) for p in paths], events
 
 
@@ -72,9 +80,10 @@ def generate_parallel(config, checkpoint, output, games, workers, seed=None, min
     validate_batching(inference_batch_size, inference_wait_ms)
     validate_profile(selfplay_policy)
     validate_min_moves(config.board_size, min_moves)
-    base_seed = config.seed if seed is None else seed
+    requested_seed = config.seed if seed is None else seed
     config, evaluator, version = _load_actor(config.to_dict(), checkpoint, device, evaluator_options)
     validate_min_moves(config.board_size, min_moves)
+    base_seed = reserve_seed_block(output, games * MAX_ATTEMPTS_PER_GAME, requested_seed)
     worker_count = min(games, workers)
     results = [None] * games
     futures = {}
@@ -87,8 +96,8 @@ def generate_parallel(config, checkpoint, output, games, workers, seed=None, min
         initargs=(config.to_dict(), server.channels, version),
     ) as pool:
         for i in range(games):
-            future = pool.submit(_actor_game_task, output, base_seed + i * 10000,
-                                 min_moves, score_utility, selfplay_policy)
+            future = pool.submit(_actor_game_task, output, selfplay_game_seed(base_seed, i),
+                                 min_moves, score_utility, selfplay_policy, True)
             futures[future] = i
         for future in as_completed(futures):
             index = futures[future]

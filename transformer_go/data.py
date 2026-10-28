@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import os
 import uuid
+from zipfile import ZipFile
 import numpy as np
 from ._native import Board
 from .sgf import parse
@@ -157,17 +158,51 @@ def _relabel_legacy_shard(path: Path, data: dict, metadata: dict) -> tuple[dict,
     return corrected, corrected_meta
 
 
+def _training_signature(path: Path):
+    # CRC and size are only a fast candidate filter, never proof of equality.
+    with ZipFile(path) as archive:
+        return tuple((archive.getinfo(f"{key}.npy").CRC,
+                      archive.getinfo(f"{key}.npy").file_size) for key in FIELDS)
+
+
+def _same_training_arrays(first: Path, second: Path) -> bool:
+    """Compare all serialized training arrays exactly after a signature match."""
+    with ZipFile(first) as left, ZipFile(second) as right:
+        for key in FIELDS:
+            member = f"{key}.npy"
+            with left.open(member) as a, right.open(member) as b:
+                while True:
+                    left_bytes, right_bytes = a.read(1 << 20), b.read(1 << 20)
+                    if left_bytes != right_bytes:
+                        return False
+                    if not left_bytes:
+                        break
+    return True
+
+
 def load_replay(directory: str | Path, size: int, max_positions: int, *,
                 return_sampling_weights=False):
     """Load a recent replay window and optional per-position freshness weights.
 
-    Shards are read newest first. The returned weights are constant within a
+    Shards are read newest first, skipping identical training arrays even when
+    their game IDs differ. The returned weights are constant within a
     shard and linearly decrease from ``NEWEST_REPLAY_WEIGHT`` for the newest
     selected shard to ``OLDEST_REPLAY_WEIGHT`` for the oldest selected shard.
     """
-    chunks, count, seen = [], 0, set()
+    chunks, count, seen, seen_contents = [], 0, set(), {}
     files = sorted(Path(directory).glob("*.npz"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
     for path in files:
+        signature = _training_signature(path)
+        candidates = seen_contents.get(signature, ())
+        if candidates:
+            with np.load(path, allow_pickle=False) as shard:
+                meta = json.loads(str(shard["metadata"]))
+            if meta.get("schema_version") != SCHEMA_VERSION:
+                raise ValueError("unsupported shard schema")
+            if meta.get("source") != "selfplay":
+                raise ValueError(f"selfplay-only training rejects non-selfplay shard: {path}")
+            if any(_same_training_arrays(path, candidate) for candidate in candidates):
+                continue
         data, meta = read_shard(path)
         if data["features"].shape[-1] != size:
             continue
@@ -178,6 +213,7 @@ def load_replay(directory: str | Path, size: int, max_positions: int, *,
         if meta.get("adjudication_version") != ADJUDICATION_VERSION:
             data, meta = _relabel_legacy_shard(path, data, meta)
         seen.add(meta["game_id"])
+        seen_contents.setdefault(signature, []).append(path)
         remaining = max_positions-count
         chunks.append({k: v[-remaining:] for k, v in data.items()})
         count += len(chunks[-1]["value"])

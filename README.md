@@ -150,6 +150,28 @@ runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/summary.js
 
 各分项 loss 为加权前数值；`total` 是按 summary 中权重求和的优化目标，`grad_norm` 是裁剪前梯度范数。replay 分布会随训练变化，因此 loss 趋势需要结合评估结果判断，不能单凭下降认定棋力提高。
 
+### 一键绘制 loss 曲线
+
+```bash
+# 默认读取 runs/zero-9x9/training-loss.csv，生成离线 HTML
+python3 scripts/plot_loss.py
+
+# 生成后直接在浏览器打开
+python3 scripts/plot_loss.py --open
+
+# 等价的 Makefile 入口
+make plot-loss
+make plot-loss ARGS="--recent 100 --open"
+
+# 指定其他 run、CSV 或输出路径
+python3 scripts/plot_loss.py --root runs/另一个运行目录 --recent 100
+python3 scripts/plot_loss.py --csv /path/to/training-loss.csv --output /path/to/loss.html
+```
+
+默认输出为 `runs/zero-9x9/analysis/loss-curve.html`；自定义数据源时输出到 CSV 所在目录下的 `analysis/loss-curve.html`。脚本仅使用 Python 标准库，HTML 的数据与绘图代码全部内嵌，无需安装绘图库或联网。也可以直接执行 `./scripts/plot_loss.py`；默认 run 以脚本位置为准，不依赖当前工作目录，显式传入的相对路径则相对于当前工作目录。
+
+曲线包含总 loss 完整历史、最近 50 次训练放大、五个分项 loss 和裁剪前梯度范数；鼠标移动或触摸可查看具体轮次、step 和均值。横轴使用训练 step，重跑产生的同名轮次会分别保留。每次执行读取最新 CSV 快照并原子更新报告，不修改训练日志、权重或训练进程；尚未完成训练的逐步日志不计入曲线，正在追加的最后一条不完整 CSV 记录会暂时跳过并提示。
+
 ## 清理旧 checkpoint 和 replay
 
 脚本默认预览 `runs/zero-9x9` 中修改时间早于当前时刻 24 小时的文件，添加 `--delete` 才实际删除：

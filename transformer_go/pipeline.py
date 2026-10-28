@@ -15,7 +15,6 @@ from .inference import validate_batching
 from .gating import (DEFAULT_GATING_GAMES, DEFAULT_REQUIRED_WIN_PROP, GATEKEEPER_PROTOCOL,
                      gatekeeper_decision, validate_gating_options)
 
-
 def atomic_copy(source, target):
     target = Path(target)
     temporary = target.with_suffix(target.suffix+".tmp")
@@ -71,7 +70,7 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
             from .actors import generate_parallel
             del model
             generate_parallel(config, best_path, root/"replay", selfplay_games,
-                              selfplay_workers, config.seed+index*100000,
+                              selfplay_workers, config.seed,
                               min_moves=min_moves, score_utility=score_utility,
                               report=report, device=device,
                               inference_batch_size=inference_batch_size,
@@ -79,7 +78,7 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
                               evaluator_options=evaluator_options)
         else:
             generate(config, Evaluator(model, inference_device, **options), root/"replay", selfplay_games,
-                     config.seed+index*100000, model_version(best_path), report,
+                     config.seed, model_version(best_path), report,
                      min_moves=min_moves, score_utility=score_utility, selfplay_policy=selfplay_policy)
         candidate = root/f"candidate-{index:04d}.pt"
         # Learner keeps improving even when a candidate fails to replace the actor model.
