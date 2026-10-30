@@ -10,7 +10,7 @@
 | Neural Engine | 可选 Core ML CPU_AND_NE 推理、FP16 固定形状导出、全部预测头、合法 mask、按权重/棋盘/batch 缓存、集中合批与 loop/对弈接口接入、静态设备计划诊断 | 多局面/长时间吞吐与功耗基准；训练仍由 PyTorch/MPS 执行 |
 | MCTS | C++ PUCT、批量叶子、虚拟访问、根 Dirichlet、温度落子、精确目标预算、合法 mask、自博弈最少手数 pass 约束、可选 score utility、每局完整历史校验的落子子树复用 | 多线程共享树、FPU、动态 c_puct、playout-cap randomization |
 | 数据 | 原子 NPZ、自博弈 SGF 导出/查看、终局标签、视角/D8 增强、近期 replay window、校验 | streaming shards、优先回放、自动隔离坏 shard、多规则数据 |
-| 训练 | 仅自博弈 RL trainer、数据来源检查、checkpoint 来源记录、masked policy CE、WDL CE、score Gaussian NLL、ownership CE、moves Huber、AdamW、裁剪、恢复 RNG | warmup/scheduler、验证集、DDP、训练监控 |
+| 训练 | 仅自博弈 RL trainer、数据来源检查、checkpoint 来源记录、masked policy CE 与 KataGo 风格软策略目标、平滑 WDL/ownership CE、中立 ownership 软目标、Gaussian/Student-t 混合 score NLL、moves Huber、AdamW、裁剪、恢复 RNG | warmup/scheduler、独立验证集、DDP、多随机种子棋力评测 |
 | 自博弈 | 单机 actor、spawn CPU 搜索进程、父进程单网络集中合批推理、跨落子子树复用、父进程转发 `game_completed` 与推理批次统计、模型 SHA256、截断局丢弃 | 远程 actor 队列、自博弈开局多样化、规则/贴目随机化、目标设备吞吐调优 |
 | 评测 | KataGo gatekeeper match points、胜平负/无结果半分、数学可确定时提前接受/拒绝、配对颜色、空盘、温度衰减、描述性 Wilson 区间与 Elo、best/learner 分离、正式裁定与网络形势报告分离、spawn 并行评估、candidate/baseline 按模型分别合批和独立搜索树、两树随实战每手同步推进、父进程按种子顺序汇总 `evaluation_game` | 按开局对统计、外部 KataGo/GNU Go 比赛、固定战术基准、多棋盘/多规则 gatekeeper、目标 GPU 基准调优 |
 | 接口 | GTP 2、本地逐行 JSON-RPC 2.0、CLI；`final_status_list alive/dead/seki` | HTTP 服务、分析可视化、带版本的热切换 |
@@ -21,7 +21,9 @@
 
 2026-10-21 增量：默认自博弈使用 `katago` profile，含 0.75→0.15 平滑温度、policy-shaped Dirichlet 和适配简化 PUCT 的回顾性权重修正。实际树访问数不变，训练目标取修正权重归一化；`legacy` 可切回原方案。未实现 LCB、分叉局、廉价搜索等完整 KataGo 训练算法。每次训练保存全部 step 的 JSONL 和原子 summary，loop 在评估前追加 `training-loss.csv`，重跑使用独立子目录；日志不进入 checkpoint schema。评估同时支持 SGF 和独立零温度观棋，详见 README。
 
-最新验证：native 已重新编译，全套 138 passed、5 skipped（MPS 不可用）；临时真实 CLI 的并行 katago→串行 legacy 续跑两轮通过，4 局自博弈、4 局评估、训练 step 2→4、2 行 loss 记录。验证覆盖中断日志保留、续训不覆盖、原始访问预算/树复用、软策略训练目标。未修改运行中的长训练、已有权重或 replay，尚无棋力 A/B 结论。
+2026-10-30：完成两种损失配置各累计十轮的 Core ML 自博弈/评估与 MPS 训练对照。新损失得分率 52.00%（400 局，描述性 95% Wilson 区间 47.11%–56.85%），证据不足以确认棋力提升；完整限制与颜色拆分见 `runs/ab-loss-coreml-20261029/continuation-10rounds/REPORT.md`。正式 `configs/tiny.yaml` 已切换为新损失参数。
+
+历史工程验证（2026-10-21）：native 已重新编译，全套 138 passed、5 skipped（MPS 不可用）；临时真实 CLI 的并行 katago→串行 legacy 续跑两轮通过，4 局自博弈、4 局评估、训练 step 2→4、2 行 loss 记录。验证覆盖中断日志保留、续训不覆盖、原始访问预算/树复用和软策略训练目标。未修改运行中的长训练、已有权重或 replay。
 
 与最初研究方案的明确调整：macOS 用 MPS 而非 TensorRT；v1 采用 float32 而非默认 BF16；训练 uncertainty 使用 Gaussian NLL，避免只输出而不训练方差头；ownership 为三分类，正确保留中立点；按用户要求取消人类棋谱预训练；训练只接受自博弈数据，从随机网络启动。以上均由接口与数值正确性需要决定。
 

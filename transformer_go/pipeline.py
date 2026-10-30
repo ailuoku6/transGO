@@ -6,7 +6,7 @@ from .model import PolicyValueNet
 from .runtime import select_inference_device
 from .search import Evaluator
 from .checkpoint import save_checkpoint, load_checkpoint, model_version
-from .selfplay import generate, validate_min_moves
+from .selfplay import generate, validate_min_moves, MAX_ATTEMPTS_PER_GAME
 from .train import train
 from .training_metrics import append_loss_history
 from .exploration import validate_profile, exploration_settings
@@ -14,6 +14,14 @@ from .evaluate import evaluate, evaluate_parallel
 from .inference import validate_batching
 from .gating import (DEFAULT_GATING_GAMES, DEFAULT_REQUIRED_WIN_PROP, GATEKEEPER_PROTOCOL,
                      gatekeeper_decision, validate_gating_options)
+
+SELFPLAY_SEED_ITERATION_STRIDE = 1_000_000
+SELFPLAY_SEED_OFFSET = 1_000  # Separate resumed runs from the old overlapping seed schedule.
+
+
+def selfplay_iteration_seed(config_seed, iteration):
+    return config_seed + iteration * SELFPLAY_SEED_ITERATION_STRIDE + SELFPLAY_SEED_OFFSET
+
 
 def atomic_copy(source, target):
     target = Path(target)
@@ -46,6 +54,8 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
     validate_min_moves(config.board_size, min_moves)
     validate_batching(inference_batch_size, inference_wait_ms)
     validate_profile(selfplay_policy)
+    if selfplay_games * MAX_ATTEMPTS_PER_GAME > SELFPLAY_SEED_ITERATION_STRIDE - SELFPLAY_SEED_OFFSET:
+        raise ValueError("too many self-play games for non-overlapping iteration seeds")
     options = evaluator_options or {}
     inference_device = select_inference_device(str(device), options.get("backend", "torch"))
     if not isinstance(selfplay_workers, int) or isinstance(selfplay_workers, bool) or selfplay_workers < 1:
@@ -66,11 +76,12 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
         model, best_config, _ = load_checkpoint(best_path, load_device, selfplay_only=True)
         if best_config.to_dict() != config.to_dict(): raise ValueError("pipeline checkpoint config mismatch")
         index = max((int(p.stem.split("-")[1]) for p in root.glob("iteration-*.json")), default=0)+1
+        generation_seed = selfplay_iteration_seed(config.seed, index)
         if selfplay_workers > 1:
             from .actors import generate_parallel
             del model
             generate_parallel(config, best_path, root/"replay", selfplay_games,
-                              selfplay_workers, config.seed,
+                              selfplay_workers, generation_seed,
                               min_moves=min_moves, score_utility=score_utility,
                               report=report, device=device,
                               inference_batch_size=inference_batch_size,
@@ -78,7 +89,7 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
                               evaluator_options=evaluator_options)
         else:
             generate(config, Evaluator(model, inference_device, **options), root/"replay", selfplay_games,
-                     config.seed, model_version(best_path), report,
+                     generation_seed, model_version(best_path), report,
                      min_moves=min_moves, score_utility=score_utility, selfplay_policy=selfplay_policy)
         candidate = root/f"candidate-{index:04d}.pt"
         # Learner keeps improving even when a candidate fails to replace the actor model.

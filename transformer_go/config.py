@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass, field
+import math
 from pathlib import Path
 import yaml
 
@@ -42,6 +43,30 @@ class TrainConfig:
     score_weight: float = 0.3
     ownership_weight: float = 0.2
     moves_weight: float = 0.1
+    # KataGo-inspired calibration for the targets already present in replay.
+    policy_soft_weight: float = 0.25
+    policy_soft_exponent: float = 0.25
+    value_label_smoothing: float = 0.02
+    ownership_label_smoothing: float = 0.02
+    ownership_neutral_smoothing: float = 0.15
+    # Blend Gaussian NLL with a heavy-tailed Student-t score likelihood.
+    score_robust_weight: float = 0.25
+    score_student_t_df: float = 5.0
+
+    def __post_init__(self):
+        probabilities = (
+            self.value_label_smoothing,
+            self.ownership_label_smoothing,
+            self.ownership_neutral_smoothing,
+            self.score_robust_weight,
+        )
+        if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in probabilities):
+            raise ValueError("loss smoothing and blend weights must be in [0,1]")
+        if (not math.isfinite(self.policy_soft_weight) or self.policy_soft_weight < 0.0 or
+                not math.isfinite(self.policy_soft_exponent) or self.policy_soft_exponent <= 0.0):
+            raise ValueError("policy soft weight must be nonnegative and exponent positive")
+        if not math.isfinite(self.score_student_t_df) or self.score_student_t_df <= 0.0:
+            raise ValueError("score_student_t_df must be positive")
 
 
 @dataclass

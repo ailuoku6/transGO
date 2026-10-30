@@ -122,7 +122,7 @@ TRANSFORMER_GO_TEST_COREML=1 .venv/bin/python -m pytest tests/test_coreml.py -q 
 - 根节点使用按网络策略塑形的 Dirichlet 噪声，总 concentration 为 `10.83`，一半均匀、一半按截断后的 log policy 分配；混合权重沿用 `search.dirichlet_epsilon`。
 - 搜索完成后，参照 KataGo 回顾性修正减少低效探索的选点权重。实际落子从修正权重按温度抽样，训练策略目标则是修正权重直接归一化，**不再按落子温度锐化**。低访问但高价值的候选仍可保留，不设置一刀切的 1% 概率门槛。
 
-这部分对照本地 KataGo `d91ea855` 的 `cpp/configs/training/selfplay1_maxsize9.cfg`、`searchhelpers.cpp`、`searchresults.cpp` 和 `searchexplorehelpers.cpp`。温度/噪声方案取自该示例，权重修正则适配本项目简化 PUCT，是近似移植；尚未移植 LCB、分叉局和廉价搜索等完整训练机制。当前 tiny 配置的 200 次访问预算不变，也尚无棋力提升的 A/B 结论。
+这部分对照本地 KataGo `d91ea855` 的 `cpp/configs/training/selfplay1_maxsize9.cfg`、`searchhelpers.cpp`、`searchresults.cpp` 和 `searchexplorehelpers.cpp`。温度/噪声方案取自该示例，权重修正则适配本项目简化 PUCT，是近似移植；尚未移植 LCB、分叉局和廉价搜索等完整训练机制。当前 tiny 配置的 200 次访问预算不变。十轮损失函数对照结果见 [实验报告](runs/ab-loss-coreml-20261029/continuation-10rounds/REPORT.md)：新损失得分率 52.00%，描述性 95% 区间包含 50%，尚不足以确认棋力提升。
 
 原始 `visits`、`policy` 和树复用统计保持搜索的真实访问数；新增 `selection_weights`、`selection_policy` 表示修正后的选点/目标权重。replay 元数据保存 `exploration` 和 `policy_correction_stats`，`game_completed` 也输出平均修正量与单访问点的权重占比。评估/晋级仍用既有无根噪声协议，独立 `eval --temperature 0` 仍选原始最高访问次数。
 
@@ -140,7 +140,7 @@ runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/steps.json
 runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/summary.json
 ```
 
-- `training-loss.csv`：每次完成训练追加一行，包含轮次、起止训练 step、采样池局面数，以及各项的整轮均值和最后一步值。训练结束即写入，无需等待评估完成。
+- `training-loss.csv`：每次完成训练追加一行，包含轮次、起止训练 step、采样池局面数、`loss_version`，以及各项的整轮均值和最后一步值。训练结束即写入，无需等待评估完成；旧行在公式切换时版本列为空，新实现记录为版本 2。
 - `steps.jsonl`：每个训练步记录 `total/policy/value/score/ownership/moves/grad_norm`，逐步 flush；训练中断时已写步骤仍保留。
 - `summary.json`：训练和 candidate checkpoint 保存成功后原子写入，包含上述指标的 mean/min/max/last、各损失权重、设备和日志路径；完整轮次的 `iteration-NNNN.json` 也包含该汇总。
 
@@ -149,6 +149,10 @@ runs/zero-9x9/training/iteration-NNNN/steps-起始步数-唯一后缀/summary.js
 单独 `train` 默认写到 `OUTPUT_PARENT/training/OUTPUT_STEM/steps-*`，可通过 `--metrics-dir` 指定目录。终端仍输出训练进度，训练完成时额外输出 `training_summary`。新日志从运行更新后的代码开始记录，旧版本未持久化的逐步 loss 不能从 checkpoint 还原。
 
 各分项 loss 为加权前数值；`total` 是按 summary 中权重求和的优化目标，`grad_norm` 是裁剪前梯度范数。replay 分布会随训练变化，因此 loss 趋势需要结合评估结果判断，不能单凭下降认定棋力提高。
+
+训练目标在现有五个输出头上增加了轻量校准：策略 loss 混合原始 MCTS 软标签 CE 与 `target^0.25` 的低访问量平滑 CE（混合权重 `0.25`）；WDL 标签使用 `0.02` label smoothing；ownership 使用三分类 CE，对中立点额外以 `0.15` 混合“双方归属各半”的软目标；score 使用 `0.75` Gaussian NLL + `0.25` Student-t NLL（自由度 `5`），降低终局分数极端误差对梯度的影响。score、ownership、moves 仍分别乘 `0.3/0.2/0.1`，总目标仍以 policy/value 为主。所有新参数位于 `train` 配置中，可通过 YAML 覆盖；它们只改变损失计算，不改变模型结构或 replay 格式。
+
+正式 `tiny.yaml` 配置默认启用这套损失。它针对现有自博弈标签做稳健性校准，不代表棋力已得到提升；判断训练效果应看固定协议的完整评测，并结合 value/score 校准，而不能仅看训练 loss 数值。
 
 ### 一键绘制 loss 曲线
 
@@ -184,6 +188,17 @@ python3 scripts/plot_loss.py --csv /path/to/training-loss.csv --output /path/to/
 清理范围仅为运行目录根部的旧 `.pt`。始终保留根部 `best.pt`、`learner.pt`，并跳过符号链接；`replay/` 下的 `.npz`、`.sgf`，以及评估/观棋目录、训练 loss 和 iteration JSON 均保留。删除前会再次检查文件年龄，已更新的文件跳过。
 
 “一天之前”按滚动 24 小时计算，不是当天零点。可用 `--older-than-hours 48` 改为两天前，或用 `--root runs/另一个运行目录` 指定 run；默认目录相对于脚本位置确定，不依赖启动时的当前目录。输出包含截止时间、文件清单及总字节数。训练、评估或对弈正在使用 checkpoint 时，应等当前进程完成后再执行删除，避免它在后续阶段需要重新读取某个待删除文件。
+
+## 回放精确去重
+
+先暂停读取或写入回放目录的训练进程，再执行预览和删除：
+
+```bash
+.venv/bin/python scripts/dedupe_replay.py --replay-dir runs/zero-9x9/replay
+.venv/bin/python scripts/dedupe_replay.py --replay-dir runs/zero-9x9/replay --delete
+```
+
+脚本以训练数组为准判断重复，忽略每局随机生成的 `game_id` 等元数据。它先用数组 CRC 和大小筛选候选，再逐字节比较全部训练数组；CRC 碰撞不会导致误删。每组优先保留有 SGF 的回放，再保留修改时间较新的回放。默认仅预览；`--delete` 会先在 `analysis/` 写入 JSONL 删除清单，再删除重复的 `.npz`、对应的 `.sgf` 和判定缓存。目录在扫描期间若有回放增删或内容变化，脚本拒绝删除；删除后可再次运行预览确认重复数为零。
 
 ## 并行自博弈与评估
 

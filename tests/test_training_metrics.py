@@ -75,3 +75,28 @@ def test_failed_training_keeps_completed_step_log_without_completed_summary(tmp_
     assert step["step"] == 1 and step["iteration"] == 4
     assert not list(directory.glob("steps-*/summary.json"))
     assert all(np.isfinite(step[key]) for key in LOSS_KEYS)
+
+
+def test_loss_history_adds_loss_version_and_preserves_legacy_rows(tmp_path):
+    path = tmp_path / "training-loss.csv"
+    path.write_text(
+        "iteration,start_step,end_step,steps,positions,finished_at,"
+        "mean_total,last_total,checkpoint,summary_path\n"
+        "1,1,1,1,10,old,3.0,3.0,old.pt,old.json\n",
+        encoding="utf-8",
+    )
+    summary = {
+        "iteration": 2, "start_step": 2, "end_step": 2, "steps": 1,
+        "positions": 10, "finished_at": "new", "checkpoint": "new.pt",
+        "summary_path": "new.json", "loss_version": 2,
+        "mean": {key: 1.0 for key in LOSS_KEYS},
+        "last": {key: 1.0 for key in LOSS_KEYS},
+    }
+
+    append_loss_history(path, summary)
+
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row["loss_version"] for row in rows] == ["", "2"]
+    assert rows[0]["mean_total"] == "3.0"
+    assert rows[1]["mean_total"] == "1.0"

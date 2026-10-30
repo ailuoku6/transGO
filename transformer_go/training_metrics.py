@@ -1,12 +1,14 @@
 """Durable loss records, separate from model configuration and checkpoints."""
 import csv
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import mkdtemp
+from tempfile import NamedTemporaryFile, mkdtemp
 
 
 LOSS_KEYS = ("total", "policy", "value", "score", "ownership", "moves", "grad_norm")
+LOSS_FUNCTION_VERSION = 2
 
 
 class TrainingLog:
@@ -18,6 +20,7 @@ class TrainingLog:
         self.summary_path = self.directory / "summary.json"
         self.stream = self.path.open("w", encoding="utf-8")
         self.header = {"schema_version": 1, "iteration": iteration,
+                       "loss_version": LOSS_FUNCTION_VERSION,
                        "checkpoint": str(output), "start_step": start_step + 1,
                        "requested_steps": steps,
                        "started_at": datetime.now(timezone.utc).isoformat()}
@@ -63,12 +66,32 @@ def append_loss_history(path, summary):
     path.parent.mkdir(parents=True, exist_ok=True)
     row = {key: summary[key] for key in
            ("iteration", "start_step", "end_step", "steps", "positions", "finished_at")}
+    row["loss_version"] = summary.get("loss_version", 1)
     for aggregate in ("mean", "last"):
         row.update({f"{aggregate}_{key}": summary[aggregate][key] for key in LOSS_KEYS})
     row.update(checkpoint=summary["checkpoint"], summary_path=summary["summary_path"])
     needs_header = not path.exists() or path.stat().st_size == 0
-    with path.open("a", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(row))
-        if needs_header:
+    old_rows, old_fields = [], []
+    if not needs_header:
+        with path.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            old_fields = reader.fieldnames or []
+            old_rows = list(reader)
+    fields = old_fields + [key for key in row if key not in old_fields]
+    if old_fields and fields != old_fields:
+        with NamedTemporaryFile("w", newline="", encoding="utf-8", dir=path.parent,
+                                prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            writer = csv.DictWriter(stream, fieldnames=fields)
             writer.writeheader()
-        writer.writerow(row)
+            writer.writerows(old_rows)
+            writer.writerow(row)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    else:
+        with path.open("a", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            if needs_header:
+                writer.writeheader()
+            writer.writerow(row)

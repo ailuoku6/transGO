@@ -15,3 +15,10 @@ search:
 train:
   batch_size: 128
   lr: 0.0002
+  policy_soft_weight: 0.25
+  policy_soft_exponent: 0.25
+  value_label_smoothing: 0.02
+  ownership_label_smoothing: 0.02
+  ownership_neutral_smoothing: 0.15
+  score_robust_weight: 0.25
+  score_student_t_df: 5.0
