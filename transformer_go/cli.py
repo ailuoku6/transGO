@@ -126,7 +126,9 @@ def cmd_loop(args):
                  selfplay_workers=args.selfplay_workers, eval_workers=args.eval_workers,
                  inference_batch_size=args.inference_batch_size,
                  inference_wait_ms=args.inference_wait_ms, selfplay_policy=args.selfplay_policy,
-                 evaluator_options=evaluator_options(args))
+                 evaluator_options=evaluator_options(args), gating=not args.no_gating,
+                 anchor_checkpoint=args.anchor_checkpoint, anchor_every=args.anchor_every,
+                 anchor_games=args.anchor_games, rollback_drop=args.rollback_drop)
 
 
 def cmd_rpc(args):
@@ -267,7 +269,18 @@ def main():
     p.add_argument("--selfplay-workers", type=int, default=1,
                    help="spawned self-play actors per iteration (default: 1)")
     p.add_argument("--eval-workers", type=int, default=1,
-                   help="spawned evaluation workers per match (default: 1)")
+                   help="spawned evaluation workers per gatekeeper or anchor match (default: 1)")
+    p.add_argument("--no-gating", action="store_true",
+                   help="promote every candidate without a gatekeeper match, like AlphaZero")
+    p.add_argument("--anchor-checkpoint",
+                   help="fixed opponent for periodic strength checks; copied into OUTPUT/anchors")
+    p.add_argument("--anchor-every", type=int, default=0,
+                   help="play best vs the anchor every N iterations; record only (default: 0, off)")
+    p.add_argument("--anchor-games", type=int, default=100,
+                   help="full-length games per anchor match, no early stop (default: 100)")
+    p.add_argument("--rollback-drop", type=float,
+                   help="restore best.pt and learner.pt when the anchor win rate falls this much "
+                        "below its best result, e.g. 0.15; requires --anchor-every (default: off)")
     p = sub.add_parser("benchmark"); p.set_defaults(func=cmd_benchmark)
     add_backend_options(p)
     p.add_argument("--config", default="configs/tiny.yaml")
