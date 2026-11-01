@@ -1,6 +1,6 @@
 """Anchor-based regression guard.
 
-After each fixed-anchor match the guard compares the anchor win rate with the
+After each anchor match the guard compares the win rate with the
 best one seen so far for the same anchor. A new high stores a restore point
 (best and learner weights). A drop of at least ``rollback_drop`` restores both
 best.pt and learner.pt from that point. After MAX_ROLLBACKS_PER_RESTORE
@@ -140,3 +140,26 @@ def apply_regression_guard(root, iteration, best_path, learner_path, anchor_sha2
                                             ("iteration", "winrate", "decision")},
             "reference_winrate": record["restore_point"]["winrate"]})
     return record
+
+
+def rebase_regression_guard(root, iteration, best_path, learner_path, anchor_sha256):
+    """Make a newly confirmed anchor the restore point for future matches.
+
+    A model's expected score against its own snapshot is 0.5. Keeping the
+    paired learner state here lets a later regression restore the confirmed
+    weights instead of treating the first weaker challenger as the baseline.
+    """
+    directory = Path(root) / "anchors"
+    directory.mkdir(parents=True, exist_ok=True)
+    state_path = directory / STATE_NAME
+    previous = json.loads(state_path.read_text()) if state_path.exists() else None
+    point = _save_restore_point(directory, iteration, best_path, learner_path, 0.5)
+    if previous is not None:
+        _prune_restore_point(previous["restore_point"],
+                             {point["best_path"], point["learner_path"]})
+    _atomic_write_json(state_path, {"anchor_sha256": anchor_sha256,
+                                    "restore_point": point,
+                                    "rollbacks_to_restore_point": 0,
+                                    "last_check": {"iteration": iteration,
+                                                   "winrate": 0.5,
+                                                   "decision": "anchor_advanced"}})

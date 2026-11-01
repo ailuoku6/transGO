@@ -273,9 +273,9 @@ def main():
     p.add_argument("--no-gating", action="store_true",
                    help="promote every candidate without a gatekeeper match, like AlphaZero")
     p.add_argument("--anchor-checkpoint",
-                   help="fixed opponent for periodic strength checks; copied into OUTPUT/anchors")
+                   help="initial anchor (defaults to best.pt); a strictly winning full match advances it")
     p.add_argument("--anchor-every", type=int, default=0,
-                   help="play best vs the anchor every N iterations; record only (default: 0, off)")
+                   help="play best vs the current confirmed anchor every N iterations (default: 0, off)")
     p.add_argument("--anchor-games", type=int, default=100,
                    help="full-length games per anchor match, no early stop (default: 100)")
     p.add_argument("--rollback-drop", type=float,

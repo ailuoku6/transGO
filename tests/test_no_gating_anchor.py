@@ -89,12 +89,14 @@ def test_anchor_check_runs_on_schedule_and_never_changes_promotion(tmp_path, mon
     assert [r["promoted"] for r in records] == [False, False]
     assert "anchor_evaluation" not in records[0]
     check = records[1]["anchor_evaluation"]
-    assert check["protocol"] == "fixed-anchor-v1"
+    assert check["protocol"] == "strongest-confirmed-anchor-v1"
     assert check["anchor_sha256"] == anchor_hash
     assert check["subject_sha256"] == records[1]["best_sha256"]
     assert check["seed"] == pipeline.anchor_match_seed(config.seed, 2)
     assert check["result"]["played"] == 4 and check["result"]["wins"] == 3
     assert check["result"]["gating"] is None and not check["result"]["early_stopped"]
+    assert check["anchor_advanced"] is True
+    assert check["active_anchor_sha256"] == check["subject_sha256"]
     snapshot = directory / "anchors" / f"anchor-{anchor_hash[:16]}.pt"
     assert check["anchor"] == str(snapshot) and model_version(snapshot) == anchor_hash
     assert len(list((directory / "evaluation" / "anchor-0002").glob("*/*.sgf"))) == 4
@@ -103,8 +105,76 @@ def test_anchor_check_runs_on_schedule_and_never_changes_promotion(tmp_path, mon
     assert json.loads(lines[0])["winrate"] == .75
 
 
+def test_anchor_advances_only_after_win_and_survives_resume(tmp_path, monkeypatch):
+    config, cfg_path = smoke_config(tmp_path)
+    directory = tmp_path / "run"
+    anchor = tmp_path / "anchor.pt"
+    save_checkpoint(anchor, PolicyValueNet(config.model), config)
+    seed_hash = model_version(anchor)
+    monkeypatch.setattr(pipeline, "Evaluator", lambda *_, **__: pass_only)
+    calls = record_games(monkeypatch, ["win"] * 4 + ["win"] * 2 + ["loss"] * 6 + ["win"] * 4)
+    args = ["transformer-go", "loop", "--config", str(cfg_path), "--output", str(directory),
+            "--games", "1", "--steps", "1", "--no-gating", "--anchor-checkpoint", str(anchor),
+            "--anchor-every", "1", "--anchor-games", "4"]
+    monkeypatch.setattr(sys, "argv", args + ["--iterations", "1"])
+    main()
+    first = json.loads((directory / "iteration-0001.json").read_text())
+    first_check = first["anchor_evaluation"]
+    assert first_check["anchor_sha256"] == seed_hash
+    assert first_check["anchor_advanced"] is True
+    champion = first_check["subject_sha256"]
+    assert champion != seed_hash
+    # The source is only an initial seed. A resumed run keeps its confirmed snapshot.
+    anchor.unlink()
+    assert not anchor.exists()
+    monkeypatch.setattr(sys, "argv", args + ["--iterations", "3"])
+    main()
+    checks = [json.loads((directory / f"iteration-{i:04d}.json").read_text())["anchor_evaluation"]
+              for i in (1, 2, 3, 4)]
+    assert len(calls) == 16
+    assert [c["anchor_sha256"] for c in checks] == [seed_hash, champion, champion, champion]
+    assert [c["anchor_advanced"] for c in checks] == [True, False, False, True]
+    assert checks[1]["result"]["winrate"] == 0.5
+    assert checks[2]["result"]["winrate"] == 0.0
+    active = json.loads((directory / "anchors" / "active-anchor.json").read_text())
+    assert active["sha256"] == checks[3]["subject_sha256"]
+    assert active["iteration"] == 4
+    assert model_version(directory / "anchors" / active["filename"]) == active["sha256"]
+
+
+def test_anchor_identity_compares_weights_not_training_metadata(tmp_path):
+    config, _ = smoke_config(tmp_path)
+    model = PolicyValueNet(config.model)
+    initial, metadata_only, changed = [tmp_path / f"{name}.pt"
+                                       for name in ("initial", "metadata", "changed")]
+    save_checkpoint(initial, model, config, step=0)
+    save_checkpoint(metadata_only, model, config, step=1)
+    assert model_version(initial) != model_version(metadata_only)
+    assert not pipeline._models_differ(initial, metadata_only)
+    with torch.no_grad():
+        next(model.parameters()).add_(1)
+    save_checkpoint(changed, model, config, step=1)
+    assert pipeline._models_differ(initial, changed)
+
+
+def test_omitted_anchor_checkpoint_uses_initial_best(tmp_path, monkeypatch):
+    config, cfg_path = smoke_config(tmp_path)
+    directory = tmp_path / "run"
+    monkeypatch.setattr(pipeline, "Evaluator", lambda *_, **__: pass_only)
+    record_games(monkeypatch, ["win"] * 4)
+    monkeypatch.setattr(sys, "argv", [
+        "transformer-go", "loop", "--config", str(cfg_path), "--output", str(directory),
+        "--iterations", "1", "--games", "1", "--steps", "1", "--no-gating",
+        "--anchor-every", "1", "--anchor-games", "4"])
+    main()
+    record = json.loads((directory / "iteration-0001.json").read_text())
+    check = record["anchor_evaluation"]
+    assert check["anchor_sha256"] == record["baseline_sha256"]
+    initial_snapshot = directory / "anchors" / f"anchor-{record['baseline_sha256'][:16]}.pt"
+    assert model_version(initial_snapshot) == record["baseline_sha256"]
+
+
 @pytest.mark.parametrize("kwargs,message", [
-    ({"anchor_every": 2}, "requires anchor_checkpoint"),
     ({"anchor_every": -1}, "nonnegative"),
     ({"anchor_every": 1, "anchor_checkpoint": "missing.pt"}, "does not exist"),
 ])

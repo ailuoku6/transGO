@@ -15,12 +15,12 @@ from .evaluate import evaluate, evaluate_parallel
 from .inference import validate_batching
 from .gating import (DEFAULT_GATING_GAMES, DEFAULT_REQUIRED_WIN_PROP, GATEKEEPER_PROTOCOL,
                      gatekeeper_decision, validate_gating_options)
-from .regression_guard import apply_regression_guard
+from .regression_guard import apply_regression_guard, rebase_regression_guard
 
 SELFPLAY_SEED_ITERATION_STRIDE = 1_000_000
 SELFPLAY_SEED_OFFSET = 1_000  # Separate resumed runs from the old overlapping seed schedule.
 ALWAYS_PROMOTE_PROTOCOL = "always-promote-v1"
-ANCHOR_PROTOCOL = "fixed-anchor-v1"
+ANCHOR_PROTOCOL = "strongest-confirmed-anchor-v1"
 DEFAULT_ANCHOR_GAMES = 100
 
 
@@ -52,7 +52,8 @@ def should_promote(result, threshold=DEFAULT_REQUIRED_WIN_PROP):
     return gatekeeper_decision(points, tallied, result["games"], threshold) == "accepted"
 
 
-def validate_anchor_options(config, anchor_checkpoint, anchor_every, anchor_games, rollback_drop=None):
+def validate_anchor_options(config, anchor_checkpoint, anchor_every, anchor_games,
+                            rollback_drop=None, root=None):
     if not isinstance(anchor_every, int) or isinstance(anchor_every, bool) or anchor_every < 0:
         raise ValueError("anchor_every must be a nonnegative integer")
     if rollback_drop is not None:
@@ -64,31 +65,76 @@ def validate_anchor_options(config, anchor_checkpoint, anchor_every, anchor_game
     if not anchor_every:
         return
     validate_gating_options(anchor_games)
-    if anchor_checkpoint is None:
-        raise ValueError("anchor_every requires anchor_checkpoint")
-    if not Path(anchor_checkpoint).is_file():
-        raise ValueError(f"anchor checkpoint does not exist: {anchor_checkpoint}")
-    _, anchor_config, _ = load_checkpoint(anchor_checkpoint, torch.device("cpu"), selfplay_only=True)
+    active = _load_active_anchor(root) if root is not None else None
+    checkpoint = (active[0] if active is not None else
+                  Path(anchor_checkpoint) if anchor_checkpoint is not None else
+                  Path(root) / "best.pt" if root is not None else None)
+    if checkpoint is None or (anchor_checkpoint is None and active is None and not checkpoint.exists()):
+        # A new run creates best.pt from the supplied config before the anchor
+        # snapshot is initialized.
+        return
+    if not checkpoint.is_file():
+        raise ValueError(f"anchor checkpoint does not exist: {checkpoint}")
+    _, anchor_config, _ = load_checkpoint(checkpoint, torch.device("cpu"), selfplay_only=True)
     if (anchor_config.model != config.model or anchor_config.board_size != config.board_size):
         raise ValueError("anchor checkpoint architecture or board size differs from config")
 
 
-def snapshot_anchor(root, anchor_checkpoint):
-    """Copy the anchor into the run so edits to the source cannot move the yardstick."""
-    digest = model_version(anchor_checkpoint)
-    target = Path(root) / "anchors" / f"anchor-{digest[:16]}.pt"
-    if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy(anchor_checkpoint, target)
-    if model_version(target) != digest:
-        raise ValueError(f"anchor snapshot {target} does not match {anchor_checkpoint}")
+def _load_active_anchor(root):
+    state_path = Path(root) / "anchors" / "active-anchor.json"
+    if not state_path.exists():
+        return None
+    state = json.loads(state_path.read_text())
+    target = state_path.parent / state["filename"]
+    digest = state["sha256"]
+    if not target.is_file() or model_version(target) != digest:
+        raise ValueError(f"active anchor snapshot {target} is missing or changed")
     return target, digest
+
+
+def snapshot_anchor(root, anchor_checkpoint):
+    """Load the persisted strongest confirmed anchor, or initialize it from the seed."""
+    active = _load_active_anchor(root)
+    if active is not None:
+        return active
+    directory = Path(root) / "anchors"
+    directory.mkdir(parents=True, exist_ok=True)
+    state_path = directory / "active-anchor.json"
+    target, digest = _snapshot_checkpoint(directory, anchor_checkpoint)
+    _write_active_anchor(state_path, target, digest, iteration=0)
+    return target, digest
+
+
+def _snapshot_checkpoint(directory, checkpoint):
+    digest = model_version(checkpoint)
+    target = directory / f"anchor-{digest[:16]}.pt"
+    if not target.exists():
+        atomic_copy(checkpoint, target)
+    if model_version(target) != digest:
+        raise ValueError(f"anchor snapshot {target} does not match {checkpoint}")
+    return target, digest
+
+
+def _write_active_anchor(state_path, path, digest, iteration):
+    temporary = Path(state_path).with_suffix(".tmp")
+    temporary.write_text(json.dumps({"filename": path.name, "sha256": digest,
+                                     "iteration": iteration}, indent=2))
+    temporary.replace(state_path)
+
+
+def _models_differ(first_path, second_path):
+    # model_version hashes the entire checkpoint, including step and RNG.
+    # Anchor advancement must compare the actual network weights.
+    first = torch.load(first_path, map_location="cpu", weights_only=True)["model"]
+    second = torch.load(second_path, map_location="cpu", weights_only=True)["model"]
+    return first.keys() != second.keys() or any(
+        not torch.equal(first[name], second[name]) for name in first)
 
 
 def _anchor_match(config, subject_path, anchor_path, games, workers, report, *, seed, score_utility,
                   device, inference_device, options, evaluator_options, inference_batch_size,
                   inference_wait_ms, recording):
-    """Full fixed-length match without early stopping; it never affects promotion."""
+    """Full match without early stopping; it never affects best.pt promotion."""
     if workers > 1:
         return evaluate_parallel(
             config, subject_path, anchor_path, games, workers, report,
@@ -111,15 +157,17 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
     """Run self-play, training and promotion rounds.
 
     gating=False promotes every candidate without a match, like AlphaZero.
-    anchor_every=N plays the current best against a fixed anchor snapshot every
-    N iterations. With rollback_drop set, a win-rate drop of at least that much
+    anchor_every=N plays the current best against the strongest confirmed
+    anchor every N iterations, advancing it when the match score exceeds 50%.
+    With rollback_drop set, a win-rate drop of at least that much
     below the best anchor result restores best.pt and learner.pt from the
     restore point saved at that result (see regression_guard).
     """
     if iterations < 1:
         raise ValueError("invalid iteration count")
     validate_gating_options(eval_games, promote_threshold)
-    validate_anchor_options(config, anchor_checkpoint, anchor_every, anchor_games, rollback_drop)
+    validate_anchor_options(config, anchor_checkpoint, anchor_every, anchor_games,
+                            rollback_drop, root=directory)
     validate_min_moves(config.board_size, min_moves)
     validate_batching(inference_batch_size, inference_wait_ms)
     validate_profile(selfplay_policy)
@@ -138,7 +186,7 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
         initial_device = torch.device("cpu") if selfplay_workers > 1 or eval_workers > 1 else inference_device
         save_checkpoint(best_path, PolicyValueNet(config.model).to(initial_device), config)
     if not learner_path.exists(): atomic_copy(best_path, learner_path)
-    anchor_path, anchor_sha256 = (snapshot_anchor(root, anchor_checkpoint) if anchor_every
+    anchor_path, anchor_sha256 = (snapshot_anchor(root, anchor_checkpoint or best_path) if anchor_every
                                   else (None, None))
     for _ in range(iterations):
         # Validate the checkpoint on CPU before central inference loads it
@@ -227,6 +275,16 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
                 inference_device=inference_device, options=options,
                 evaluator_options=evaluator_options, inference_batch_size=inference_batch_size,
                 inference_wait_ms=inference_wait_ms)
+            anchor_result = record["anchor_evaluation"]["result"]
+            points = anchor_result["wins"] + 0.5 * (anchor_result["draws"] + anchor_result.get("no_results", 0))
+            # Only a completed, strictly winning match confirms a stronger
+            # anchor; a draw or self-match cannot displace the incumbent.
+            anchor_advanced = (anchor_result["played"] == anchor_games
+                               and anchor_result["completed"] == anchor_games
+                               and anchor_result.get("truncated", 0) == anchor_result.get("forced_scored", 0)
+                               and points > anchor_games / 2
+                               and record["anchor_evaluation"]["subject_sha256"] != anchor_sha256
+                               and _models_differ(best_path, anchor_path))
             if rollback_drop is not None:
                 record["regression_guard"] = apply_regression_guard(
                     root, index, best_path, learner_path, anchor_sha256,
@@ -237,6 +295,16 @@ def run_pipeline(config, device, directory, iterations=1, selfplay_games=8, trai
                     record["best_sha256_before_rollback"] = record["best_sha256"]
                     record["best_sha256"] = model_version(best_path)
                 _append_guard_history(root, record["regression_guard"])
+            if anchor_advanced and not record.get("rolled_back", False):
+                anchor_path, anchor_sha256 = _snapshot_checkpoint(root / "anchors", best_path)
+                if rollback_drop is not None:
+                    rebase_regression_guard(root, index, best_path, learner_path, anchor_sha256)
+                _write_active_anchor(root / "anchors" / "active-anchor.json", anchor_path,
+                                     anchor_sha256, index)
+            else:
+                anchor_advanced = False
+            record["anchor_evaluation"]["anchor_advanced"] = anchor_advanced
+            record["anchor_evaluation"]["active_anchor_sha256"] = anchor_sha256
             record_path.write_text(json.dumps(record, indent=2))
         report(record)
 

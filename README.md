@@ -112,30 +112,32 @@ TRANSFORMER_GO_TEST_COREML=1 .venv/bin/python -m pytest tests/test_coreml.py -q 
 
 `--eval-games 50` 仍然可以用于较快评估；在默认 0.5 门槛下，50 盘完整比赛至少需要 25 个 match points，25 胜 25 负也会晋级。由于 gatekeeper 会提前停止，实际完成的对局数可能小于上限，iteration JSON 的 `played`、`candidate_points`、`target_points`、`stop_reason` 和 `promotion_policy` 是晋级审计依据。
 
-### 关闭晋级门槛与固定参照评测
+### 关闭晋级门槛与动态最强锚点评测
 
 `--no-gating` 跳过每轮的 gatekeeper 对局，每个 candidate 都直接成为下一轮自博弈的 best，做法与 AlphaZero 相同。iteration JSON 中 `promotion_policy` 为 `always-promote-v1`，`evaluation` 和 `eval_seed` 为 `null`。learner 的训练过程不受影响。
 
-不设门槛时，用固定参照评测监控棋力：`--anchor-checkpoint` 指定一个固定的对手权重，`--anchor-every N` 表示每 N 轮让当前 best 对它下 `--anchor-games` 盘（默认 100），完整下完、不提前停止，结果只做记录，不影响晋级。参照权重第一次使用时会复制到 `OUTPUT/anchors/anchor-<sha256 前 16 位>.pt`，之后都用这份快照。结果写入当轮 iteration JSON 的 `anchor_evaluation`，并追加到 `OUTPUT/anchor-evaluations.jsonl`；棋谱保存在 `OUTPUT/evaluation/anchor-NNNN/`。参照评测与 gatekeeper 共用 `--eval-workers`。
+不设门槛时，用动态锚点评测监控棋力：`--anchor-checkpoint` 可指定初始已确认权重；省略时，使用输出目录当前的 `best.pt`（新运行则为刚初始化的 best）。`--anchor-every N` 表示每 N 轮让当前 best 对当前锚点下 `--anchor-games` 盘（默认 100），完整下完、不提前停止。match points 严格超过 50% 且 best 与锚点不是同一权重时，best 会晋升为新的锚点；平局或未胜出时继续使用原锚点。活动锚点及 SHA-256 保存在 `OUTPUT/anchors/active-anchor.json`，重启后会继续使用该快照。锚点评测不影响晋级。结果写入当轮 iteration JSON 的 `anchor_evaluation`，并追加到 `OUTPUT/anchor-evaluations.jsonl`；棋谱保存在 `OUTPUT/evaluation/anchor-NNNN/`。参照评测与 gatekeeper 共用 `--eval-workers`。
 
 ```bash
 .venv/bin/transformer-go loop \
   --config configs/tiny.yaml --output runs/zero-9x9 \
   --iterations 500 --games 128 --steps 1000 --min-moves 70 --no-gating \
-  --anchor-checkpoint runs/anchors/fixed.pt --anchor-every 25 --anchor-games 100 \
+  --anchor-every 25 --anchor-games 100 \
   --selfplay-workers 10 --eval-workers 10
 ```
 
-固定参照评测在 iteration JSON 写入后才开始；如果中途被中断，重启后不会重跑这一轮的自博弈和训练，但这次参照评测也不会补做。
+续训时可以省略初始锚点参数；即使原权重文件已移动，训练也会继续使用输出目录内保存的活动锚点。每轮的 anchor_evaluation 会记录 anchor_advanced 和 active_anchor_sha256，便于审计锚点晋升。
+
+锚点评测在 iteration JSON 写入后才开始；如果中途被中断，重启后不会重跑这一轮的自博弈和训练，但这次锚点评测也不会补做。
 
 ### 退步自动回滚
 
-加上 `--rollback-drop 0.15`（需要同时开启 `--anchor-every`）后，每次固定参照评测结束都会做一次检查：
+加上 `--rollback-drop 0.15`（需要同时开启 `--anchor-every`）后，每次锚点评测结束都会做一次检查：
 
 - 胜率创出对当前参照的新高，或者是第一次评测时，把当时的 `best.pt` 和 `learner.pt` 存为恢复点，放在 `OUTPUT/anchors/restore-NNNN-*.pt`。
 - 胜率比恢复点低至少 0.15 时，把 `best.pt` 和 `learner.pt` 都恢复成恢复点的权重和优化器状态，下一轮自博弈就用恢复后的 best。训练步数和随机数状态继续往前走，不会倒退，loss 日志不会出现重复的步数。回滚期间生成的自博弈数据留在回放里。
 - 同一个恢复点已经回滚过 2 次后，如果再次触发，改为以当前结果作为新的恢复点，不再回滚。这是为了避免一次偶然偏高的胜率反复触发回滚。
-- 更换参照权重后，旧的胜率不再有可比性，会重新建立恢复点。
+- 锚点晋升后，旧的胜率不再有可比性；新锚点会以 50% 基线重新建立恢复点。
 
 每次检查都写进当轮 iteration JSON：`regression_guard` 记录判定结果（`new_restore_point`、`hold`、`rollback`、`rebase_after_rollback_limit`）、与恢复点的胜率差，回滚前后 best 和 learner 的 SHA-256 及训练步数；`rolled_back` 标记这一轮是否回滚。回滚时 `best_sha256` 记为恢复后的权重，回滚前的值记在 `best_sha256_before_rollback`。所有检查也会追加到 `OUTPUT/regression-guard.jsonl`，当前状态在 `OUTPUT/anchors/regression-guard.json`。`scripts/cleanup_old_artifacts.py` 只清理输出目录顶层的 `.pt` 文件，不会删除恢复点。
 

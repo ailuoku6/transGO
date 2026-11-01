@@ -12,7 +12,8 @@ from transformer_go.checkpoint import load_checkpoint, model_version, save_check
 from transformer_go.cli import main
 from transformer_go.config import load_config
 from transformer_go.model import PolicyValueNet
-from transformer_go.regression_guard import MAX_ROLLBACKS_PER_RESTORE, apply_regression_guard
+from transformer_go.regression_guard import (MAX_ROLLBACKS_PER_RESTORE,
+                                             apply_regression_guard, rebase_regression_guard)
 
 
 def write_weights(path, step, seed):
@@ -121,6 +122,22 @@ def test_changed_anchor_or_missing_restore_point_resets_reference(run):
     assert record["reset_reason"] == "restore_point_missing"
 
 
+def test_promoted_anchor_becomes_rollback_restore_point(run):
+    root, best, learner = run
+    guard(run, 25, .75)
+    champion = model_version(best)
+    rebase_regression_guard(root, 25, best, learner, champion)
+    assert state(root)["anchor_sha256"] == champion
+    assert state(root)["restore_point"]["winrate"] == .5
+    write_weights(best, 20, 3)
+    write_weights(learner, 22, 4)
+    result = guard(run, 50, 0, anchor=champion, drop=.3)
+    assert result["decision"] == "rollback"
+    assert result["restore_point"]["best_sha256"] == champion
+    assert model_version(best) == champion
+    assert result["after"]["learner_step"] == 22
+
+
 def test_loop_records_rollback_and_selfplay_uses_restored_best(tmp_path, monkeypatch):
     config = load_config("configs/smoke.yaml")
     config.device = "cpu"
@@ -136,7 +153,8 @@ def test_loop_records_rollback_and_selfplay_uses_restored_best(tmp_path, monkeyp
         policy[:, -1] = 1
         return policy, np.zeros(len(boards), dtype=np.float32), np.zeros(len(boards), dtype=np.float32)
 
-    outcomes = iter(["win"] * 4 + ["win"] + ["loss"] * 3 + ["win"] * 4)
+    outcomes = iter(["win"] * 2 + ["loss"] * 2 + ["loss"] * 4
+                    + ["win"] * 2 + ["loss"] * 2)
 
     def play(config, candidate, baseline, candidate_color, seed, score_utility, max_moves, temperature=None):
         outcome = next(outcomes)
@@ -158,7 +176,7 @@ def test_loop_records_rollback_and_selfplay_uses_restored_best(tmp_path, monkeyp
         "new_restore_point", "rollback", "hold"]
     assert [r["rolled_back"] for r in records] == [False, True, False]
     rollback = records[1]
-    assert rollback["regression_guard"]["drop"] == pytest.approx(.75)
+    assert rollback["regression_guard"]["drop"] == pytest.approx(.5)
     assert rollback["best_sha256_before_rollback"] == rollback["candidate_sha256"]
     assert rollback["best_sha256"] == records[0]["candidate_sha256"]
     assert rollback["regression_guard"]["after"]["best_sha256"] == records[0]["candidate_sha256"]
@@ -175,6 +193,51 @@ def test_loop_records_rollback_and_selfplay_uses_restored_best(tmp_path, monkeyp
     assert steps == [1, 2, 3]
     _, _, payload = load_checkpoint(directory / "learner.pt", torch.device("cpu"))
     assert payload["step"] == 3
+
+
+def test_loop_rolls_back_to_newly_confirmed_anchor(tmp_path, monkeypatch):
+    config = load_config("configs/smoke.yaml")
+    config.device = "cpu"
+    config.search.dirichlet_epsilon = 0
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(config.to_dict()))
+    anchor = tmp_path / "anchor.pt"
+    save_checkpoint(anchor, PolicyValueNet(config.model), config)
+    directory = tmp_path / "run"
+
+    def pass_only(boards):
+        policy = np.zeros((len(boards), 10), dtype=np.float32)
+        policy[:, -1] = 1
+        return policy, np.zeros(len(boards), dtype=np.float32), np.zeros(len(boards), dtype=np.float32)
+
+    outcomes = iter(["win"] * 4 + ["loss"] * 4)
+
+    def play(config, candidate, baseline, candidate_color, seed, score_utility, max_moves, temperature=None):
+        outcome = next(outcomes)
+        return {"outcome": outcome, "forced_scored": False, "moves": 2,
+                "actions": [config.board_size ** 2] * 2,
+                "score": candidate_color * (1 if outcome == "win" else -1),
+                "move_comments": ["test fixture"] * 2}
+
+    monkeypatch.setattr(pipeline, "Evaluator", lambda *_, **__: pass_only)
+    monkeypatch.setattr(evaluation, "_play_evaluation_game", play)
+    monkeypatch.setattr(sys, "argv", [
+        "transformer-go", "loop", "--config", str(cfg_path), "--output", str(directory),
+        "--iterations", "2", "--games", "1", "--steps", "1", "--no-gating",
+        "--anchor-checkpoint", str(anchor), "--anchor-every", "1", "--anchor-games", "4",
+        "--rollback-drop", "0.3"])
+    main()
+    first, second = [json.loads((directory / f"iteration-{i:04d}.json").read_text())
+                     for i in (1, 2)]
+    assert first["anchor_evaluation"]["anchor_advanced"] is True
+    champion = first["candidate_sha256"]
+    assert second["anchor_evaluation"]["anchor_sha256"] == champion
+    assert second["anchor_evaluation"]["anchor_advanced"] is False
+    assert second["regression_guard"]["decision"] == "rollback"
+    assert second["regression_guard"]["restore_point"]["winrate"] == .5
+    assert second["best_sha256"] == champion == model_version(directory / "best.pt")
+    active = json.loads((directory / "anchors" / "active-anchor.json").read_text())
+    assert active["sha256"] == champion
 
 
 @pytest.mark.parametrize("drop,every,message", [
