@@ -2,7 +2,7 @@ import math
 import json
 from pathlib import Path
 from tempfile import mkdtemp
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
 import multiprocessing
 import numpy as np
 from ._native import Board
@@ -299,10 +299,10 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
                       evaluator_options=None):
     """Evaluate in spawned processes while aggregating in deterministic order.
 
-    At most ``workers`` games are in flight at once.  A gatekeeper decision is
-    checked after each result in schedule order; already-running games in the
-    current batch may finish, but are discarded after an early decision and do
-    not affect ``played`` or promotion.
+    Workers immediately receive another game when one completes. Results are
+    still counted in schedule order so gatekeeper decisions and SGF numbering
+    are deterministic. A gatekeeper decision stops further submissions; games
+    already running do not affect ``played`` or promotion.
     """
     if not isinstance(workers, int) or isinstance(workers, bool) or workers < 2:
         raise ValueError("parallel evaluation requires workers >= 2")
@@ -315,7 +315,7 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
     target = games * required_candidate_win_prop if gating else None
     settings = _play_settings(config, max_moves, temperature)
     settings["workers"] = worker_count
-    settings["scheduler"] = "spawn-process-batches"
+    settings["scheduler"] = "spawn-process-work-queue"
     settings["inference"] = "central-batched"
     settings["inference_backend"] = (evaluator_options or {}).get("backend", "torch")
     settings["inference_batch_size"] = inference_batch_size
@@ -345,14 +345,33 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
         initializer=_init_evaluation_worker,
         initargs=(config.to_dict(), server.channels),
     ) as pool:
-        for start in range(0, games, worker_count):
-            batch = schedule[start:start + worker_count]
-            futures = [pool.submit(_evaluation_game_task, color, game_seed,
-                                   score_utility, max_moves, temperature)
-                       for color, game_seed in batch]
-            for offset, future in enumerate(futures):
-                candidate_color, game_seed = batch[offset]
-                game = future.result()
+        next_submit = 0
+        next_count = 0
+        completed_results = {}
+        pending = {}
+
+        def submit_next():
+            nonlocal next_submit
+            if next_submit >= games:
+                return
+            color, game_seed = schedule[next_submit]
+            future = pool.submit(_evaluation_game_task, color, game_seed,
+                                 score_utility, max_moves, temperature)
+            pending[future] = next_submit
+            next_submit += 1
+
+        for _ in range(worker_count):
+            submit_next()
+
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in sorted(done, key=lambda item: pending[item]):
+                index = pending.pop(future)
+                completed_results[index] = future.result()
+
+            while next_count in completed_results:
+                candidate_color, game_seed = schedule[next_count]
+                game = completed_results.pop(next_count)
                 outcome = game["outcome"]
                 if outcome not in ("win", "loss", "draw", "no_result"):
                     raise ValueError("invalid evaluation outcome")
@@ -383,11 +402,18 @@ def evaluate_parallel(config, candidate_path, baseline_path, games=DEFAULT_GATIN
                     report({"event": "evaluation_stopped", "game": played, "games": games,
                             "decision": decision, "reason": stop_reason,
                             "candidate_points": points, "target_points": target})
-                    for pending in futures[offset + 1:]:
-                        pending.cancel()
                     break
+                next_count += 1
+                if gating and decision != "pending":
+                    break
+
             if gating and decision != "pending":
+                for future in pending:
+                    future.cancel()
                 break
+
+            for _ in range(len(done)):
+                submit_next()
     rate = points / played
     interval = wilson_interval(points, played)
     elo = 400*math.log10(rate/(1-rate)) if 0 < rate < 1 else None

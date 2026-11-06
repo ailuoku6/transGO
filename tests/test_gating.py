@@ -336,3 +336,53 @@ def test_parallel_evaluation_batches_and_preserves_gatekeeper_accounting(monkeyp
     metadata = json.loads(parse(files[0].read_text())[0]["C"][0])
     assert metadata["game_seed"] == calls[0][1]
     assert events[1]["sgf_path"] == str(files[0])
+
+
+def test_parallel_evaluation_refills_workers_as_games_finish(monkeypatch):
+    config = load_config("configs/smoke.yaml")
+    submissions = []
+    first_future = None
+    first_was_running_at_refill = []
+
+    class StreamingPool:
+        def __init__(self, *args, initializer=None, initargs=(), **kwargs):
+            if initializer is not None:
+                initializer(*initargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, function, *args):
+            nonlocal first_future
+            future = Future()
+            submissions.append(args)
+            index = len(submissions) - 1
+            if index == 0:
+                first_future = future
+            else:
+                future.set_result(function(*args))
+            if index == 2:
+                first_was_running_at_refill.append(not first_future.done())
+                first_future.set_result(game(*submissions[0]))
+            return future
+
+    monkeypatch.setattr(evaluation, "ProcessPoolExecutor", StreamingPool)
+    monkeypatch.setattr(evaluation, "_init_evaluation_worker", lambda *args: None)
+    monkeypatch.setattr(evaluation, "_load_evaluation_models", lambda *args: {})
+
+    def game(color, seed, score_utility, max_moves, temperature=None):
+        return {"outcome": "draw", "forced_scored": False, "moves": 2,
+                "actions": [9, 9], "score": 0, "move_comments": ["fixture"] * 2}
+
+    monkeypatch.setattr(evaluation, "_evaluation_game_task", game)
+    result = evaluation.evaluate_parallel(
+        config, "candidate.pt", "baseline.pt", games=4, workers=2,
+        report=lambda _: None, seed=123, device=torch.device("cpu"))
+
+    assert result["played"] == 4
+    assert len(submissions) == 4
+    assert first_was_running_at_refill == [True]
+    assert result["play_settings"]["scheduler"] == "spawn-process-work-queue"
